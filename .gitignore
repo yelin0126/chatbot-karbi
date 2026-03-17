@@ -1,0 +1,26 @@
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Python package files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+chroma_db/
+*.sqlite3
+*.db
