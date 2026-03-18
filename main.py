@@ -2,26 +2,27 @@
 ChatBot API Server — main.py
 Ubuntu 22.04 LTS / Ollama + Qwen/Llama + ChromaDB RAG + marker-pdf
 """
-
 import os
 import glob
 import shutil
 import subprocess
+import uuid
+import time
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
-
+load_dotenv()
 # ── 환경 설정 ────────────────────────────────────────────
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "qwen2.5:7b")
