@@ -2,27 +2,26 @@
 ChatBot API Server — main.py
 Ubuntu 22.04 LTS / Ollama + Qwen/Llama + ChromaDB RAG + marker-pdf
 """
+
 import os
 import glob
 import shutil
 import subprocess
-import uuid
-import time
 from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
-load_dotenv()
+
 # ── 환경 설정 ────────────────────────────────────────────
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "qwen2.5:7b")
@@ -63,6 +62,9 @@ class ChatRequest(BaseModel):
 
 
 # ── 유틸: marker-pdf 추출 ───────────────────────────────
+# venv 안의 marker_single 절대경로 자동 탐색
+MARKER_BIN = os.path.join(os.path.dirname(sys.executable), "marker_single")
+
 def extract_text_with_marker(pdf_path: str) -> str:
     pdf_file = Path(pdf_path)
     output_root = Path(MARKER_OUTPUT_DIR)
@@ -71,7 +73,7 @@ def extract_text_with_marker(pdf_path: str) -> str:
     try:
         result = subprocess.run(
             [
-                "marker_single",
+                MARKER_BIN,
                 str(pdf_file),
                 "--output_format", "markdown",
                 "--output_dir", str(output_root),
