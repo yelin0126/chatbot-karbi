@@ -1,8 +1,25 @@
-venv/
+# Python
 __pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Environment
 .env
+
+# Data & Models
 chroma_db/
 marker_output/
-backup_pdf/
-data/
-*.pyc
+finetuning/output/
+*.gguf
+*.bin
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
