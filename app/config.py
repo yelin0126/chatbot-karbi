@@ -67,6 +67,10 @@ AUTO_INGEST_ON_STARTUP = os.getenv("AUTO_INGEST_ON_STARTUP", "false").lower() ==
 # ── Web Search (NEW — original had mode but no actual search) ─────────
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
+# ── VLM PDF Extraction (NEW) ─────────────────────────────────────────
+VLM_EXTRACTION_ENABLED = os.getenv("VLM_EXTRACTION_ENABLED", "true").lower() == "true"
+VLM_EXTRACTION_MODEL = os.getenv("VLM_EXTRACTION_MODEL", "qwen2.5vl:7b")
+
 # ── Logging ───────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
