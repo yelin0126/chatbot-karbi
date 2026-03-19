@@ -265,7 +265,8 @@
 
 <script>
     // ── 설정 ──────────────────────────────────────────────────────
-    const API = 'http://172.16.5.41:8091';
+    //const API = 'http://172.16.5.41:8091';
+    const API = 'http://localhost:8000';
 
     const USERS = JSON.parse(localStorage.getItem('ai_users') || 'null') || {
         'admin': { pw: 'admin123', role: '관리자' },
