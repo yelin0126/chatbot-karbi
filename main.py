@@ -19,6 +19,9 @@ from app.config import (
     logger,
     AUTO_INGEST_ON_STARTUP,
     DATA_DIR,
+    LIBRARY_DIR,
+    UPLOADS_DIR,
+    TEMP_DIR,
     OLLAMA_MODEL,
     EMBEDDING_MODEL,
     RERANKER_ENABLED,
@@ -43,9 +46,17 @@ async def lifespan(app: FastAPI):
     logger.info("  Embedding     : %s", EMBEDDING_MODEL)
     logger.info("  Reranker      : %s", RERANKER_MODEL if RERANKER_ENABLED else "disabled")
     logger.info("  Data dir      : %s", DATA_DIR)
-    logger.info("  File watcher  : active (auto-ingests new files in data/)")
+    logger.info("  Library dir   : %s", LIBRARY_DIR)
+    logger.info("  Uploads dir   : %s", UPLOADS_DIR)
+    logger.info("  Temp dir      : %s", TEMP_DIR)
+    logger.info("  File watcher  : active (auto-ingests new files in data/library/)")
     logger.info("  Chat UI       : http://localhost:8000/ui")
     logger.info("=" * 60)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
     # Initialize vectorstore
     get_vectorstore()
@@ -53,12 +64,12 @@ async def lifespan(app: FastAPI):
     # Auto-ingest if configured
     if AUTO_INGEST_ON_STARTUP:
         try:
-            result = ingest_folder(DATA_DIR)
+            result = ingest_folder(LIBRARY_DIR)
             logger.info("Auto-ingest result: %s", result.get("message"))
         except Exception as e:
             logger.warning("Auto-ingest skipped: %s", e)
 
-    # Start file watcher (auto-ingests new files dropped into data/)
+    # Start file watcher (auto-ingests new files dropped into data/library/)
     start_watcher()
 
     yield  # App is running

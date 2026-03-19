@@ -14,7 +14,15 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
-from app.config import OLLAMA_MODEL, AVAILABLE_MODELS, DATA_DIR, CHROMA_DIR, ENABLE_OCR
+from app.config import (
+    OLLAMA_MODEL,
+    AVAILABLE_MODELS,
+    DATA_DIR,
+    LIBRARY_DIR,
+    UPLOADS_DIR,
+    CHROMA_DIR,
+    ENABLE_OCR,
+)
 from app.models.schemas import (
     ChatRequest,
     ChatResponse,
@@ -23,23 +31,18 @@ from app.models.schemas import (
     SourceInfo,
 )
 from app.core.llm import check_ollama_health
+from app.core.watcher import suppress_watcher_for
 from app.core.vectorstore import (
     get_vectorstore,
     get_collection_stats,
     get_all_metadata,
     reset as reset_vectorstore,
 )
-from app.chat.router import detect_mode
-from app.chat.handlers import (
-    handle_general,
-    handle_document_qa,
-    handle_ocr_extract,
-    handle_web_search,
-)
+from app.chat.handlers import handle_chat
 from app.pipeline.ingest import ingest_folder, ingest_single_file
 from app.pipeline.parser import extract_full_text
 
-logger = logging.getLogger("tilron.api")
+logger = logging.getLogger("tilon.api")
 
 router = APIRouter()
 
@@ -49,10 +52,12 @@ router = APIRouter()
 @router.get("/")
 def root():
     return {
-        "message": "Tilron AI Chatbot API is running",
+        "message": "Tilon AI Chatbot API is running",
         "version": "7.0.0",
         "model": OLLAMA_MODEL,
         "data_dir": str(DATA_DIR),
+        "library_dir": str(LIBRARY_DIR),
+        "uploads_dir": str(UPLOADS_DIR),
         "chroma_dir": str(CHROMA_DIR),
         "ocr_enabled": ENABLE_OCR,
     }
@@ -93,46 +98,25 @@ def list_models():
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
+    """
+    Main chat endpoint. No hardcoded modes — always searches for context,
+    LLM decides how to respond. Works like a normal chatbot.
+    """
     try:
-        mode = detect_mode(req.message)
-        model = req.model or OLLAMA_MODEL
-
-        if mode == "general":
-            result = handle_general(
-                system_prompt=req.system_prompt or "",
-                history=req.history,
-                user_message=req.message,
-                model=model,
-            )
-        elif mode == "document_qa":
-            result = handle_document_qa(
-                system_prompt=req.system_prompt or "",
-                history=req.history,
-                user_message=req.message,
-                model=model,
-            )
-        elif mode == "ocr_extract":
-            result = handle_ocr_extract(req.message)
-        elif mode == "web_search":
-            result = handle_web_search(
-                system_prompt=req.system_prompt or "",
-                history=req.history,
-                user_message=req.message,
-                model=model,
-            )
-        else:
-            result = handle_general(
-                system_prompt=req.system_prompt or "",
-                history=req.history,
-                user_message=req.message,
-                model=model,
-            )
+        result = handle_chat(
+            user_message=req.message,
+            history=req.history,
+            model=req.model or OLLAMA_MODEL,
+            active_source=req.active_source,
+            system_prompt=req.system_prompt,
+        )
 
         return ChatResponse(
-            model=model,
+            model=req.model or OLLAMA_MODEL,
             answer=result["answer"],
             sources=[SourceInfo(**s) for s in result.get("sources", [])],
-            mode=result.get("mode", mode),
+            mode=result.get("mode", "general"),
+            active_source=result.get("active_source", req.active_source),
             done=True,
         )
 
@@ -169,14 +153,15 @@ async def chat_with_file(
             detail=f"Unsupported file type: {ext}",
         )
 
-    # Step 1: Save the file
-    save_path = DATA_DIR / file.filename
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Step 1: Save the file to chat uploads
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    save_path = UPLOADS_DIR / file.filename
 
     try:
         with open(save_path, "wb") as f:
             content = await file.read()
             f.write(content)
+        suppress_watcher_for(save_path)
         logger.info("Saved uploaded file: %s (%d bytes)", file.filename, len(content))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
@@ -195,25 +180,21 @@ async def chat_with_file(
             "done": True,
         }
 
-    # Step 3: Now answer the question using the freshly ingested content
+    # Step 3: Answer using the unified handler, scoped to this file
     selected_model = model or OLLAMA_MODEL
-    mode = detect_mode(message)
 
-    if mode == "ocr_extract":
-        result = handle_ocr_extract(message)
-    else:
-        result = handle_document_qa(
-            system_prompt="너는 한국어로 답하는 AI 챗봇이다. 문서 근거로만 답한다.",
-            history=[],
-            user_message=message,
-            model=selected_model,
-        )
+    result = handle_chat(
+        user_message=message,
+        model=selected_model,
+        active_source=file.filename,
+    )
 
     return {
         "model": selected_model,
         "answer": result["answer"],
         "sources": result.get("sources", []),
-        "mode": result.get("mode", mode),
+        "mode": result.get("mode", "document_qa"),
+        "active_source": file.filename,
         "ingest": ingest_result,
         "done": True,
     }
@@ -223,7 +204,7 @@ async def chat_with_file(
 
 @router.post("/ingest")
 def ingest(req: IngestRequest):
-    folder = Path(req.folder_path) if req.folder_path else DATA_DIR
+    folder = Path(req.folder_path) if req.folder_path else LIBRARY_DIR
 
     try:
         result = ingest_folder(folder)
@@ -257,14 +238,15 @@ async def upload_file(file: UploadFile = File(...)):
             detail=f"Unsupported file type: {ext}. Allowed: {ALLOWED_EXTENSIONS}",
         )
 
-    # Save to data directory
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    save_path = DATA_DIR / file.filename
+    # Save to chat uploads directory
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    save_path = UPLOADS_DIR / file.filename
 
     try:
         with open(save_path, "wb") as f:
             content = await file.read()
             f.write(content)
+        suppress_watcher_for(save_path)
         logger.info("Saved uploaded file: %s (%d bytes)", file.filename, len(content))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
@@ -302,13 +284,14 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
             results.append({"file": file.filename, "status": "skipped", "reason": f"Unsupported: {ext}"})
             continue
 
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        save_path = DATA_DIR / file.filename
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        save_path = UPLOADS_DIR / file.filename
 
         try:
             with open(save_path, "wb") as f:
                 content = await file.read()
                 f.write(content)
+            suppress_watcher_for(save_path)
 
             result = ingest_single_file(save_path)
             results.append({
@@ -375,9 +358,14 @@ def docs_list():
 @router.post("/count-keyword")
 def count_keyword(req: CountKeywordRequest):
     try:
-        target_path = DATA_DIR / req.filename
+        candidate_paths = [
+            UPLOADS_DIR / req.filename,
+            LIBRARY_DIR / req.filename,
+            DATA_DIR / req.filename,
+        ]
+        target_path = next((path for path in candidate_paths if path.exists()), None)
 
-        if not target_path.exists():
+        if target_path is None:
             raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
 
         text = extract_full_text(str(target_path))

@@ -15,9 +15,10 @@ from typing import Dict, Any, List
 
 from langchain_core.documents import Document
 
-from app.config import DATA_DIR
+from app.config import LIBRARY_DIR
 from app.pipeline.parser import parse_pdf, parse_image
 from app.pipeline.chunker import chunk_documents
+from app.pipeline.enricher import enrich_chunks
 from app.core.vectorstore import add_documents, get_ingested_sources
 
 logger = logging.getLogger("tilon.ingest")
@@ -60,8 +61,9 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
             "file": name,
         }
 
-    # Chunk and store
+    # Chunk, enrich, and store
     chunks = chunk_documents(docs)
+    chunks = enrich_chunks(chunks)
     add_documents(chunks)
 
     logger.info("Ingested %s → %d chunks", name, len(chunks))
@@ -78,7 +80,7 @@ def ingest_folder(folder_path: Path = None) -> Dict[str, Any]:
     Scan a folder for PDFs and images, parse, chunk, and store.
     Skips files that are already in the vectorstore.
     """
-    folder = folder_path or DATA_DIR
+    folder = folder_path or LIBRARY_DIR
     folder.mkdir(parents=True, exist_ok=True)
 
     # IMPROVEMENT: check which files are already ingested
@@ -108,7 +110,7 @@ def ingest_folder(folder_path: Path = None) -> Dict[str, Any]:
 
         page_docs = parse_pdf(pdf_path)
         if page_docs:
-            chunks = chunk_documents(page_docs)
+            chunks = enrich_chunks(chunk_documents(page_docs))
             all_chunks.extend(chunks)
             processed_files.append(name)
 
@@ -121,7 +123,7 @@ def ingest_folder(folder_path: Path = None) -> Dict[str, Any]:
 
         docs = parse_image(img_path)
         if docs:
-            chunks = chunk_documents(docs)
+            chunks = enrich_chunks(chunk_documents(docs))
             all_chunks.extend(chunks)
             processed_files.append(name)
 

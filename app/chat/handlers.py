@@ -1,99 +1,40 @@
 """
-Mode-specific chat handlers.
+Unified chat handler — works like a normal chatbot.
 
-IMPROVEMENTS over original:
-- Web search actually calls Tavily (original just asked Ollama)
-- Handlers return structured dicts consistently
-- OCR handler simplified
+NO hardcoded mode routing. Instead:
+1. Always search vectorstore for relevant document context
+2. If web search might help, search Tavily too
+3. Build one prompt with all available context
+4. LLM decides what to use
+
+This is how ChatGPT/Claude work — retrieve first, let the model decide.
 """
 
 import logging
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
 
 from app.models.schemas import Message
 from app.core.llm import call_ollama, get_response_text
 from app.retrieval.retriever import retrieve, format_context, extract_sources
-from app.chat.prompts import (
-    build_general_prompt,
-    build_document_prompt,
-    build_web_prompt,
-)
+from app.core.vectorstore import get_documents_by_source
 from app.config import OLLAMA_MODEL, TAVILY_API_KEY
 
-logger = logging.getLogger("tilon.handlers")
+logger = logging.getLogger("tilon.chat")
+DOCUMENT_CONFIDENCE_THRESHOLD = 0.45
 
 
-def handle_general(
-    system_prompt: str,
-    history: List[Message],
-    user_message: str,
-    model: str = None,
-) -> Dict[str, Any]:
-    """Handle general conversation — no retrieval needed."""
-    prompt = build_general_prompt(system_prompt, history, user_message)
-    result = call_ollama(prompt, model=model or OLLAMA_MODEL)
+# ═══════════════════════════════════════════════════════════════════════
+# Web Search (additive, not a separate mode)
+# ═══════════════════════════════════════════════════════════════════════
 
-    return {
-        "answer": get_response_text(result),
-        "sources": [],
-        "mode": "general",
-    }
-
-
-def handle_document_qa(
-    system_prompt: str,
-    history: List[Message],
-    user_message: str,
-    model: str = None,
-) -> Dict[str, Any]:
-    """Handle document-based Q&A — retrieve context then generate."""
-    docs = retrieve(user_message)
-    context = format_context(docs)
-
-    prompt = build_document_prompt(system_prompt, history, user_message, context)
-    result = call_ollama(prompt, model=model or OLLAMA_MODEL)
-
-    return {
-        "answer": get_response_text(result),
-        "sources": extract_sources(docs),
-        "mode": "document_qa",
-    }
-
-
-def handle_ocr_extract(user_message: str) -> Dict[str, Any]:
-    """Handle OCR text extraction — return raw text from documents."""
-    docs = retrieve(user_message)
-
-    if not docs:
-        return {
-            "answer": "추출 가능한 문서 텍스트를 찾지 못했습니다.",
-            "sources": [],
-            "mode": "ocr_extract",
-        }
-
-    extracted_text = "\n\n".join(d.page_content for d in docs)
-
-    return {
-        "answer": extracted_text,
-        "sources": extract_sources(docs),
-        "mode": "ocr_extract",
-    }
-
-
-def _tavily_search(query: str) -> str:
-    """
-    NEW: Actually perform web search using Tavily API.
-    Original code had a web_search mode but never searched — it just
-    asked Ollama, which has no internet access and can't answer
-    real-time questions (weather, stock prices, news, etc.).
-    """
+def _search_web(query: str) -> str:
+    """Search Tavily for current/real-time information. Returns formatted results."""
     if not TAVILY_API_KEY:
-        logger.warning("Tavily API key not set — web search unavailable.")
         return ""
 
     try:
         from tavily import TavilyClient
-
         client = TavilyClient(api_key=TAVILY_API_KEY)
         response = client.search(query, max_results=3)
 
@@ -102,36 +43,271 @@ def _tavily_search(query: str) -> str:
             title = r.get("title", "")
             content = r.get("content", "")
             url = r.get("url", "")
-            results.append(f"- {title}\n  {content}\n  ({url})")
+            results.append(f"- {title}: {content} ({url})")
 
-        return "\n\n".join(results)
+        return "\n".join(results) if results else ""
 
     except ImportError:
-        logger.warning("tavily-python not installed. Install with: pip install tavily-python")
+        logger.debug("tavily-python not installed")
         return ""
     except Exception as e:
-        logger.error("Tavily search failed: %s", e)
+        logger.debug("Web search failed: %s", e)
         return ""
 
 
-def handle_web_search(
-    system_prompt: str,
-    history: List[Message],
+def _might_need_web_search(text: str) -> bool:
+    """Light heuristic: does this query likely need real-time info?"""
+    indicators = [
+        "오늘", "현재", "최신", "최근", "실시간", "지금", "올해",
+        "날씨", "뉴스", "환율", "주가", "시세", "속보",
+        "today", "current", "latest", "recent", "now", "weather",
+        "news", "stock", "price", "score", "live",
+        "검색", "search", "look up", "find out",
+    ]
+    lower = text.lower()
+    return any(kw in lower for kw in indicators)
+
+
+def _needs_full_document_context(text: str) -> bool:
+    """
+    Detect requests that need the whole uploaded document, not just top-k chunks.
+
+    This is used only for file-scoped chat after upload.
+    """
+    lower = text.lower().strip()
+    indicators = [
+        "요약", "요약해", "정리", "정리해", "전체", "전반", "구조", "목차",
+        "분석", "분석해", "핵심", "주요 내용", "전체 내용", "섹션", "section",
+        "structure", "outline", "overview", "summarize", "summary",
+        "analyze", "analysis", "key points", "main points", "extract key",
+        "extract data", "important information", "important info",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _is_smalltalk_query(text: str) -> bool:
+    """Detect greetings/acknowledgements that should bypass document scoping."""
+    lower = text.lower().strip()
+    indicators = [
+        "안녕", "고마워", "감사", "오케이", "알겠", "응", "네",
+        "hello", "hi", "thanks", "thank you", "okay", "ok", "got it",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _document_not_found_answer(user_message: str, active_source: Optional[str]) -> str:
+    """Return a grounded fallback when scoped retrieval confidence is too low."""
+    source_name = active_source or "the uploaded document"
+    if re.search(r"[가-힣]", user_message):
+        return (
+            f"업로드된 문서 '{source_name}'에서 질문과 관련된 정보를 찾지 못했습니다. "
+            "질문을 조금 더 구체적으로 해주세요."
+        )
+    return (
+        f"I couldn't find relevant information in the uploaded document '{source_name}'. "
+        "Please try a more specific question."
+    )
+
+
+def _is_direct_extraction_query(text: str) -> bool:
+    """Detect requests that want raw OCR/text output from the uploaded file."""
+    lower = text.lower().strip()
+    indicators = [
+        "텍스트 추출", "문자 추출", "글자 추출", "읽어줘", "텍스트만", "원문", "ocr",
+        "what does this image say", "what does the image say",
+        "give me the text", "extract the text", "read the text",
+        "read this image", "text in the image", "transcribe",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _strip_enrichment_header(text: str) -> str:
+    """Remove enrichment header prepended before embedding/retrieval."""
+    return re.sub(r'^\[Document:.*?\]\n', '', text or '', flags=re.DOTALL).strip()
+
+
+def _build_direct_extraction_answer(active_source: str, docs) -> str:
+    """Return extracted document text directly for OCR/transcription requests."""
+    extracted = "\n\n".join(
+        _strip_enrichment_header(doc.page_content)
+        for doc in docs
+        if _strip_enrichment_header(doc.page_content)
+    ).strip()
+
+    if not extracted:
+        return _document_not_found_answer("extract text", active_source)
+
+    if re.search(r"[가-힣]", extracted):
+        return f"추출된 텍스트:\n\n{extracted}"
+    return f"Extracted text:\n\n{extracted}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Prompt Builder
+# ═══════════════════════════════════════════════════════════════════════
+
+def _format_history(history: List[Message], max_turns: int = 8) -> str:
+    if not history:
+        return ""
+    return "\n\n".join(
+        f"[{msg.role}]\n{msg.content}" for msg in history[-max_turns:]
+    )
+
+
+_SYSTEM_PROMPT = """You are Tilon AI, a helpful document-based chatbot.
+
+CRITICAL RULES:
+1. Respond in the SAME language the user is using. Korean → Korean. English → English. NEVER respond in Chinese (中文).
+2. If document context is provided and relevant to the question, answer based on that context and cite the source (document name, page number).
+3. If document context is provided but NOT relevant to the question, ignore it and answer normally.
+4. If no document context is available, answer from your general knowledge.
+5. If web search results are provided, use them for current/real-time information.
+6. If you don't know, say so honestly. Never make up information.
+7. Be concise and direct. Answer the question first, then explain if needed.
+8. When citing documents, mention the source naturally (e.g., "문서 3페이지에 따르면..." or "According to page 3...")."""
+
+
+def _build_prompt(
     user_message: str,
+    history: List[Message],
+    doc_context: str = "",
+    web_context: str = "",
+    system_prompt: str = "",
+) -> str:
+    """Build a single unified prompt with all available context."""
+    parts = [f"[System]\n{system_prompt or _SYSTEM_PROMPT}"]
+
+    history_text = _format_history(history)
+    if history_text:
+        parts.append(f"[Conversation history]\n{history_text}")
+
+    if doc_context:
+        parts.append(f"[Retrieved document context]\n{doc_context}")
+
+    if web_context:
+        parts.append(f"[Web search results]\n{web_context}")
+
+    parts.append(f"[User message]\n{user_message}")
+
+    return "\n\n".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Unified Chat Handler
+# ═══════════════════════════════════════════════════════════════════════
+
+def handle_chat(
+    user_message: str,
+    history: List[Message] = None,
     model: str = None,
+    active_source: str = None,
+    system_prompt: str = None,
 ) -> Dict[str, Any]:
     """
-    Handle web search queries — search first, then generate answer.
+    Unified chat handler — works like a normal chatbot.
 
-    IMPROVEMENT: Actually searches the web via Tavily before asking the LLM.
+    Args:
+        user_message: What the user said
+        history: Conversation history
+        model: Which Ollama model to use
+        active_source: Active document scope for the current chat, if any
+        system_prompt: Override default system prompt
     """
-    search_results = _tavily_search(user_message)
+    history = history or []
+    selected_model = model or OLLAMA_MODEL
+    scoped_source = None if _is_smalltalk_query(user_message) else active_source
 
-    prompt = build_web_prompt(system_prompt, history, user_message, search_results)
-    result = call_ollama(prompt, model=model or OLLAMA_MODEL)
+    if scoped_source and _is_direct_extraction_query(user_message):
+        docs = get_documents_by_source(scoped_source)
+        if docs:
+            logger.info("Direct extraction response for '%s'", scoped_source)
+            return {
+                "answer": _build_direct_extraction_answer(scoped_source, docs),
+                "sources": extract_sources(docs),
+                "mode": "ocr_extract",
+                "active_source": scoped_source,
+            }
+
+    # ── Step 1: Always search for relevant document context ──
+    doc_context = ""
+    sources = []
+
+    use_full_document = bool(scoped_source and _needs_full_document_context(user_message))
+    retrieval = retrieve(
+        user_message,
+        source_filter=scoped_source,
+        full_document=use_full_document,
+    )
+    docs = retrieval.docs
+
+    if scoped_source and not use_full_document:
+        if not docs or (
+            retrieval.confidence < DOCUMENT_CONFIDENCE_THRESHOLD
+            and not retrieval.strong_keyword_hit
+        ):
+            logger.info(
+                "Low-confidence scoped retrieval for '%s' (confidence=%.2f, keyword_hit=%s)",
+                active_source,
+                retrieval.confidence,
+                retrieval.strong_keyword_hit,
+            )
+            return {
+                "answer": _document_not_found_answer(user_message, active_source),
+                "sources": [],
+                "mode": "document_qa",
+                "active_source": active_source,
+            }
+
+    if docs:
+        doc_context = format_context(docs)
+        sources = extract_sources(docs)
+        if use_full_document:
+            logger.info(
+                "Loaded full document context: %d chunks from '%s'",
+                len(docs),
+                scoped_source,
+            )
+        else:
+            logger.info(
+                "Found %d relevant chunks%s (confidence=%.2f, keyword_hit=%s)",
+                len(docs),
+                f" (scoped to '{scoped_source}')" if scoped_source else "",
+                retrieval.confidence,
+                retrieval.strong_keyword_hit,
+            )
+    else:
+        logger.info("No relevant document chunks found")
+
+    # ── Step 2: Check if web search might help ──
+    web_context = ""
+    if not scoped_source and _might_need_web_search(user_message):
+        web_results = _search_web(user_message)
+        if web_results:
+            web_context = web_results
+            logger.info("Added web search results")
+
+    # ── Step 3: Build prompt with all context and let LLM decide ──
+    prompt = _build_prompt(
+        user_message=user_message,
+        history=history,
+        doc_context=doc_context,
+        web_context=web_context,
+        system_prompt=system_prompt,
+    )
+
+    result = call_ollama(prompt, model=selected_model)
+    answer = get_response_text(result)
+
+    # Determine what was used (for UI display)
+    mode = "general"
+    if doc_context and sources:
+        mode = "document_qa"
+    if web_context:
+        mode = "web_search" if not doc_context else "document_qa+web"
 
     return {
-        "answer": get_response_text(result),
-        "sources": [],
-        "mode": "web_search",
+        "answer": answer,
+        "sources": sources,
+        "mode": mode,
+        "active_source": active_source,
     }

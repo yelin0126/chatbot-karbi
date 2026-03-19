@@ -3,6 +3,10 @@
 This folder contains all fine-tuning work. It is independent of the
 RAG pipeline but uses the same prompt format.
 
+System context:
+- Main product overview: [README.md](/home/tilon/chatbot-karbi/README.md)
+- Short backend architecture: [ARCHITECTURE.md](/home/tilon/chatbot-karbi/ARCHITECTURE.md)
+
 ## Key files (to be created)
 - `train.py` — QLoRA training script
 - `evaluate.py` — Model evaluation

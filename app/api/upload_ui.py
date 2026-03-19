@@ -85,6 +85,11 @@ CHAT_UI_HTML = """
         .attached-file .af-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .attached-file .af-size{color:#6366f1;font-size:.68rem}
         .attached-file .af-remove{background:none;border:none;color:#f87171;cursor:pointer;font-size:1rem;padding:0 2px}
+        .active-scope{display:none;align-items:center;gap:8px;padding:6px 10px;background:#052e16;border:1px solid #14532d;border-radius:7px;margin-bottom:6px;font-size:.78rem;color:#bbf7d0}
+        .active-scope.visible{display:flex}
+        .active-scope .scope-label{font-size:.68rem;color:#86efac;text-transform:uppercase;letter-spacing:.04em}
+        .active-scope .scope-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .active-scope .scope-clear{background:none;border:none;color:#fca5a5;cursor:pointer;font-size:1rem;padding:0 2px}
         .input-row{display:flex;gap:6px;align-items:flex-end}
         .attach-btn{width:40px;height:40px;border-radius:8px;border:1px solid #3f3f46;background:transparent;color:#71717a;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s}
         .attach-btn:hover{background:#27272a;color:#a5b4fc;border-color:#6366f1}
@@ -159,6 +164,11 @@ CHAT_UI_HTML = """
                     <span class="af-size" id="afSize"></span>
                     <button class="af-remove" onclick="removeFile()">&times;</button>
                 </div>
+                <div class="active-scope" id="activeScope">
+                    <span class="scope-label">Scoped to</span>
+                    <span class="scope-name" id="activeScopeName"></span>
+                    <button class="scope-clear" onclick="clearActiveSource()">&times;</button>
+                </div>
                 <div class="input-row">
                     <button class="attach-btn" id="attachBtn" onclick="document.getElementById('fileInput').click()">&#128206;</button>
                     <textarea id="chatInput" placeholder="Type a message or attach a file..." rows="1"
@@ -188,6 +198,8 @@ const fileInput=document.getElementById('fileInput');
 const attachedFileEl=document.getElementById('attachedFile');
 const afName=document.getElementById('afName');
 const afSize=document.getElementById('afSize');
+const activeScopeEl=document.getElementById('activeScope');
+const activeScopeName=document.getElementById('activeScopeName');
 const modelSelect=document.getElementById('modelSelect');
 const historyList=document.getElementById('historyList');
 
@@ -201,6 +213,10 @@ let chats={};  // {id: {title, messages: [{role,content,sources,mode,fileName}]}
 
 function loadChats(){
     try{chats=JSON.parse(localStorage.getItem('tilon_chats')||'{}');}catch{chats={};}
+    for(const id of Object.keys(chats)){
+        if(!Array.isArray(chats[id].messages))chats[id].messages=[];
+        if(typeof chats[id].activeSource!=='string')chats[id].activeSource='';
+    }
 }
 function saveChats(){
     try{localStorage.setItem('tilon_chats',JSON.stringify(chats));}catch{}
@@ -208,9 +224,10 @@ function saveChats(){
 
 function newChat(){
     currentChatId='chat_'+Date.now();
-    chats[currentChatId]={title:'New Chat',messages:[]};
+    chats[currentChatId]={title:'New Chat',messages:[],activeSource:''};
     saveChats();
     messagesEl.innerHTML='';
+    renderActiveSource();
     renderHistory();
     chatInput.focus();
 }
@@ -223,6 +240,7 @@ function loadChat(id){
     for(const m of chat.messages){
         appendMessageDOM(m.role,m.content,m.sources,m.mode,m.fileName);
     }
+    renderActiveSource();
     renderHistory();
     scrollBottom();
 }
@@ -253,6 +271,32 @@ function updateChatTitle(text){
         chats[currentChatId].title=text.slice(0,40)+(text.length>40?'...':'');
         saveChats();renderHistory();
     }
+}
+
+function renderActiveSource(){
+    const activeSource=(currentChatId&&chats[currentChatId])?chats[currentChatId].activeSource:'';
+    if(activeSource){
+        activeScopeName.textContent=activeSource;
+        activeScopeEl.classList.add('visible');
+    }else{
+        activeScopeName.textContent='';
+        activeScopeEl.classList.remove('visible');
+    }
+}
+
+function setActiveSource(source){
+    if(!currentChatId||!chats[currentChatId])return;
+    chats[currentChatId].activeSource=source||'';
+    saveChats();
+    renderActiveSource();
+}
+
+function clearActiveSource(){
+    if(!currentChatId||!chats[currentChatId]||!chats[currentChatId].activeSource)return;
+    const cleared=chats[currentChatId].activeSource;
+    setActiveSource('');
+    appendMessageDOM('system','Document scope cleared: '+cleared);
+    pushMessage('system','Document scope cleared: '+cleared);
 }
 
 function pushMessage(role,content,sources,mode,fileName){
@@ -292,6 +336,7 @@ async function sendMessage(){
 
     const displayText=text||(file?'Analyze this document':'');
     const selectedModel=modelSelect.value;
+    const activeSource=chats[currentChatId].activeSource||'';
 
     appendMessageDOM('user',displayText,null,null,file?file.name:null);
     pushMessage('user',displayText,null,null,file?file.name:null);
@@ -310,6 +355,7 @@ async function sendMessage(){
             const resp=await fetch('/chat-with-file',{method:'POST',body:fd});
             data=await resp.json();
             if(!resp.ok){showError(data.detail||'Upload failed');return;}
+            setActiveSource(data.active_source||file.name);
             if(data.ingest&&data.ingest.count>0){
                 appendMessageDOM('system',file.name+' — '+data.ingest.count+' chunks ingested');
                 pushMessage('system',file.name+' — '+data.ingest.count+' chunks ingested');
@@ -318,10 +364,11 @@ async function sendMessage(){
             const history=chats[currentChatId].messages.filter(m=>m.role==='user'||m.role==='assistant').slice(-8);
             const resp=await fetch('/chat',{
                 method:'POST',headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({message:text,history:history,model:selectedModel})
+                body:JSON.stringify({message:text,history:history,model:selectedModel,active_source:activeSource||null})
             });
             data=await resp.json();
             if(!resp.ok){showError(data.detail||'Error');return;}
+            if(Object.prototype.hasOwnProperty.call(data,'active_source'))setActiveSource(data.active_source||'');
         }
         appendMessageDOM('assistant',data.answer,data.sources,data.mode);
         pushMessage('assistant',data.answer,data.sources,data.mode);
@@ -396,7 +443,15 @@ async function loadDocs(){
 
 async function resetDB(){
     if(!confirm('Reset vector DB? All documents deleted.'))return;
-    try{await fetch('/reset-db',{method:'DELETE'});appendMessageDOM('system','Vector DB reset.');pushMessage('system','Vector DB reset.');loadDocs();loadHealth();}
+    try{
+        await fetch('/reset-db',{method:'DELETE'});
+        for(const id of Object.keys(chats)){chats[id].activeSource='';}
+        saveChats();
+        renderActiveSource();
+        appendMessageDOM('system','Vector DB reset.');
+        pushMessage('system','Vector DB reset.');
+        loadDocs();loadHealth();
+    }
     catch(err){appendMessageDOM('system','Reset failed');}
 }
 

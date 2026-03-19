@@ -21,6 +21,9 @@ load_dotenv()
 # ── Paths ──────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))
+UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", DATA_DIR / "uploads"))
+TEMP_DIR = Path(os.getenv("TEMP_DIR", DATA_DIR / "temp"))
 CHROMA_DIR = Path(os.getenv("CHROMA_DIR", BASE_DIR / "chroma_db"))
 MARKER_OUTPUT_DIR = BASE_DIR / "marker_output"
 

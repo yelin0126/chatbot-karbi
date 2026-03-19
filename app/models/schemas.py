@@ -27,20 +27,24 @@ class ChatRequest(BaseModel):
     )
     history: List[Message] = Field(default_factory=list)
     model: Optional[str] = None
+    active_source: Optional[str] = None
 
 
 class SourceInfo(BaseModel):
     source: Optional[str] = None
     page: Optional[int] = None
+    section: Optional[str] = None
     chunk_index: Optional[int] = None
+    chunk_type: Optional[str] = None
     extraction_method: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     model: str
     answer: str
-    sources: List[SourceInfo] = []
+    sources: List[SourceInfo] = Field(default_factory=list)
     mode: str
+    active_source: Optional[str] = None
     done: bool = True
 
 
