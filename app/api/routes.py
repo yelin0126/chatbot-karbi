@@ -31,6 +31,7 @@ from app.models.schemas import (
     SourceInfo,
 )
 from app.core.llm import check_ollama_health
+from app.core.document_registry import clear_document_registry
 from app.core.watcher import suppress_watcher_for
 from app.core.vectorstore import (
     get_vectorstore,
@@ -108,6 +109,7 @@ def chat(req: ChatRequest):
             history=req.history,
             model=req.model or OLLAMA_MODEL,
             active_source=req.active_source,
+            active_doc_id=req.active_doc_id,
             system_prompt=req.system_prompt,
         )
 
@@ -117,6 +119,7 @@ def chat(req: ChatRequest):
             sources=[SourceInfo(**s) for s in result.get("sources", [])],
             mode=result.get("mode", "general"),
             active_source=result.get("active_source", req.active_source),
+            active_doc_id=result.get("active_doc_id", req.active_doc_id),
             done=True,
         )
 
@@ -187,6 +190,7 @@ async def chat_with_file(
         user_message=message,
         model=selected_model,
         active_source=file.filename,
+        active_doc_id=ingest_result.get("doc_id"),
     )
 
     return {
@@ -195,6 +199,7 @@ async def chat_with_file(
         "sources": result.get("sources", []),
         "mode": result.get("mode", "document_qa"),
         "active_source": file.filename,
+        "active_doc_id": ingest_result.get("doc_id"),
         "ingest": ingest_result,
         "done": True,
     }
@@ -265,6 +270,8 @@ async def upload_file(file: UploadFile = File(...)):
             "message": result["message"],
             "filename": file.filename,
             "chunks_stored": result["count"],
+            "doc_id": result.get("doc_id"),
+            "source_type": result.get("source_type"),
         }
     except HTTPException:
         raise
@@ -299,6 +306,8 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
                 "status": "success" if result["count"] > 0 else "failed",
                 "chunks": result["count"],
                 "message": result["message"],
+                "doc_id": result.get("doc_id"),
+                "source_type": result.get("source_type"),
             })
         except Exception as e:
             results.append({"file": file.filename, "status": "error", "reason": str(e)})
@@ -316,6 +325,7 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
 def reset_db():
     try:
         reset_vectorstore()
+        clear_document_registry()
         return {"message": "벡터 DB 초기화 완료"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"reset-db failed: {e}")
@@ -333,12 +343,16 @@ def docs_list():
             if not meta:
                 continue
             key = (
+                meta.get("doc_id"),
                 meta.get("source"),
                 meta.get("page"),
                 meta.get("chunk_index"),
             )
             unique_docs[key] = {
+                "doc_id": meta.get("doc_id"),
                 "source": meta.get("source"),
+                "source_type": meta.get("source_type"),
+                "page_total": meta.get("page_total"),
                 "page": meta.get("page"),
                 "chunk_index": meta.get("chunk_index"),
                 "source_path": meta.get("source_path"),

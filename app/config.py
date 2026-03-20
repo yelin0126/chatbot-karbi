@@ -25,6 +25,9 @@ LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", DATA_DIR / "uploads"))
 TEMP_DIR = Path(os.getenv("TEMP_DIR", DATA_DIR / "temp"))
 CHROMA_DIR = Path(os.getenv("CHROMA_DIR", BASE_DIR / "chroma_db"))
+DOCUMENT_REGISTRY_PATH = Path(
+    os.getenv("DOCUMENT_REGISTRY_PATH", DATA_DIR / "document_registry.json")
+)
 MARKER_OUTPUT_DIR = BASE_DIR / "marker_output"
 
 # ── Ollama / LLM ──────────────────────────────────────────────────────
@@ -55,9 +58,26 @@ EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", _detect_device())
 RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "false").lower() == "true"
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANKER_TOP_N = int(os.getenv("RERANKER_TOP_N", "3"))
+RERANKER_DEVICE = os.getenv(
+    "RERANKER_DEVICE",
+    "cuda" if EMBEDDING_DEVICE == "cuda" else "cpu",
+)
+RERANKER_USE_FP16 = os.getenv(
+    "RERANKER_USE_FP16",
+    "true" if RERANKER_DEVICE == "cuda" else "false",
+).lower() == "true"
 
 # ── Retrieval ─────────────────────────────────────────────────────────
 VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "4"))
+GLOBAL_MIN_RELEVANCE_SCORE = float(os.getenv("GLOBAL_MIN_RELEVANCE_SCORE", "0.30"))
+DOCUMENT_CONFIDENCE_THRESHOLD = float(os.getenv("DOCUMENT_CONFIDENCE_THRESHOLD", "0.45"))
+SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD = float(
+    os.getenv("SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD", "0.30")
+)
+SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS = int(
+    os.getenv("SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS", "3")
+)
+STRONG_KEYWORD_CONFIDENCE_FLOOR = float(os.getenv("STRONG_KEYWORD_CONFIDENCE_FLOOR", "0.75"))
 
 # ── Chunking ──────────────────────────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))

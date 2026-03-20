@@ -16,19 +16,34 @@ from typing import List, Optional, Tuple
 
 from langchain_core.documents import Document
 
-from app.config import RERANKER_ENABLED, RERANKER_MODEL, RERANKER_TOP_N
+from app.config import (
+    RERANKER_ENABLED,
+    RERANKER_MODEL,
+    RERANKER_TOP_N,
+    RERANKER_DEVICE,
+    RERANKER_USE_FP16,
+)
 
 logger = logging.getLogger("tilon.reranker")
 
 _reranker = None
+_reranker_load_failed = False
+_reranker_device = RERANKER_DEVICE
 
 
-def _load_reranker():
+def _load_reranker(force_device: Optional[str] = None):
     """Lazy-load the reranker model."""
     global _reranker
+    global _reranker_load_failed
+    global _reranker_device
 
-    if _reranker is not None:
+    requested_device = force_device or _reranker_device
+
+    if _reranker is not None and requested_device == _reranker_device:
         return _reranker
+
+    if _reranker_load_failed:
+        return None
 
     if not RERANKER_ENABLED:
         return None
@@ -36,17 +51,29 @@ def _load_reranker():
     try:
         from FlagEmbedding import FlagReranker
 
-        logger.info("Loading reranker model '%s'...", RERANKER_MODEL)
-        _reranker = FlagReranker(RERANKER_MODEL, use_fp16=True)
+        logger.info(
+            "Loading reranker model '%s' (device=%s, fp16=%s)...",
+            RERANKER_MODEL,
+            requested_device,
+            RERANKER_USE_FP16 if requested_device == "cuda" else False,
+        )
+        _reranker = FlagReranker(
+            RERANKER_MODEL,
+            use_fp16=RERANKER_USE_FP16 if requested_device == "cuda" else False,
+            devices=requested_device,
+        )
+        _reranker_device = requested_device
         logger.info("Reranker loaded successfully.")
         return _reranker
     except ImportError:
+        _reranker_load_failed = True
         logger.warning(
             "FlagEmbedding not installed — reranking disabled. "
             "Install with: pip install FlagEmbedding"
         )
         return None
     except Exception as e:
+        _reranker_load_failed = True
         logger.error("Failed to load reranker: %s", e)
         return None
 
@@ -93,6 +120,24 @@ def rerank(
         )
         return results
 
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower() and _reranker_device != "cpu":
+            logger.warning("Reranker hit CUDA OOM, retrying on CPU.")
+            try:
+                reranker = _load_reranker(force_device="cpu")
+                if reranker is None:
+                    return documents
+                scores = reranker.compute_score(pairs, normalize=True)
+                if isinstance(scores, (float, int)):
+                    scores = [scores]
+                scored_docs: List[Tuple[float, Document]] = list(zip(scores, documents))
+                scored_docs.sort(key=lambda x: x[0], reverse=True)
+                return [doc for _, doc in scored_docs[:top_n]]
+            except Exception as cpu_error:
+                logger.error("CPU reranking fallback failed, returning original order: %s", cpu_error)
+                return documents
+        logger.error("Reranking failed, returning original order: %s", e)
+        return documents
     except Exception as e:
         logger.error("Reranking failed, returning original order: %s", e)
         return documents

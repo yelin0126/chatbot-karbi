@@ -16,12 +16,32 @@ from typing import Dict, Any, List
 from langchain_core.documents import Document
 
 from app.config import LIBRARY_DIR
+from app.core.document_registry import infer_source_type, upsert_document
 from app.pipeline.parser import parse_pdf, parse_image
 from app.pipeline.chunker import chunk_documents
 from app.pipeline.enricher import enrich_chunks
 from app.core.vectorstore import add_documents, get_ingested_sources
 
 logger = logging.getLogger("tilon.ingest")
+
+
+def _annotate_source_identity(docs: List[Document], file_path: Path) -> List[Document]:
+    """Add source-type metadata before chunking so identity survives downstream."""
+    source_type = infer_source_type(file_path)
+    doc_scope = "persistent" if source_type == "library" else "chat_upload"
+    annotated = []
+    for doc in docs:
+        annotated.append(
+            Document(
+                page_content=doc.page_content,
+                metadata={
+                    **doc.metadata,
+                    "source_type": source_type,
+                    "doc_scope": doc_scope,
+                },
+            )
+        )
+    return annotated
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -53,6 +73,8 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
             "file": name,
         }
 
+    docs = _annotate_source_identity(docs, file_path)
+
     if not docs:
         return {
             "message": f"Could not extract text from {name}. "
@@ -65,6 +87,7 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
     chunks = chunk_documents(docs)
     chunks = enrich_chunks(chunks)
     add_documents(chunks)
+    registry_entry = upsert_document(file_path, docs, len(chunks))
 
     logger.info("Ingested %s → %d chunks", name, len(chunks))
 
@@ -72,6 +95,8 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
         "message": f"Successfully ingested {name}: {len(chunks)} chunks stored.",
         "count": len(chunks),
         "file": name,
+        "doc_id": registry_entry.get("doc_id") if registry_entry else None,
+        "source_type": registry_entry.get("source_type") if registry_entry else None,
     }
 
 
@@ -97,40 +122,26 @@ def ingest_folder(folder_path: Path = None) -> Dict[str, Any]:
         image_files.extend(glob.glob(str(folder / ext)))
     image_files = sorted(image_files)
 
-    all_chunks: List[Document] = []
     processed_files = []
     skipped_files = []
+    total_chunks = 0
 
-    # Process PDFs
-    for pdf_path in pdf_files:
-        name = Path(pdf_path).name
+    for file_path_str in pdf_files + image_files:
+        path = Path(file_path_str)
+        name = path.name
         if name in already_ingested:
             skipped_files.append(name)
             continue
 
-        page_docs = parse_pdf(pdf_path)
-        if page_docs:
-            chunks = enrich_chunks(chunk_documents(page_docs))
-            all_chunks.extend(chunks)
+        result = ingest_single_file(path)
+        if result.get("count", 0) > 0:
             processed_files.append(name)
-
-    # Process images
-    for img_path in image_files:
-        name = Path(img_path).name
-        if name in already_ingested:
-            skipped_files.append(name)
-            continue
-
-        docs = parse_image(img_path)
-        if docs:
-            chunks = enrich_chunks(chunk_documents(docs))
-            all_chunks.extend(chunks)
-            processed_files.append(name)
+            total_chunks += int(result["count"])
 
     if skipped_files:
         logger.info("Skipped %d already-ingested files: %s", len(skipped_files), skipped_files)
 
-    if not all_chunks:
+    if total_chunks == 0:
         return {
             "message": "No new documents to ingest.",
             "count": 0,
@@ -138,11 +149,9 @@ def ingest_folder(folder_path: Path = None) -> Dict[str, Any]:
             "skipped": skipped_files,
         }
 
-    add_documents(all_chunks)
-
     return {
-        "message": f"Ingested {len(all_chunks)} chunks from {len(processed_files)} files.",
-        "count": len(all_chunks),
+        "message": f"Ingested {total_chunks} chunks from {len(processed_files)} files.",
+        "count": total_chunks,
         "files": processed_files,
         "skipped": skipped_files,
     }

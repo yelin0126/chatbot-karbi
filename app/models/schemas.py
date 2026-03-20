@@ -28,10 +28,14 @@ class ChatRequest(BaseModel):
     history: List[Message] = Field(default_factory=list)
     model: Optional[str] = None
     active_source: Optional[str] = None
+    active_doc_id: Optional[str] = None
 
 
 class SourceInfo(BaseModel):
+    doc_id: Optional[str] = None
     source: Optional[str] = None
+    source_type: Optional[str] = None
+    source_path: Optional[str] = None
     page: Optional[int] = None
     section: Optional[str] = None
     chunk_index: Optional[int] = None
@@ -45,6 +49,7 @@ class ChatResponse(BaseModel):
     sources: List[SourceInfo] = Field(default_factory=list)
     mode: str
     active_source: Optional[str] = None
+    active_doc_id: Optional[str] = None
     done: bool = True
 
 

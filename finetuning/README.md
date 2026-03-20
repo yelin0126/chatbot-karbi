@@ -10,8 +10,24 @@ System context:
 ## Key files (to be created)
 - `train.py` — QLoRA training script
 - `evaluate.py` — Model evaluation
-- `data/` — Training data (JSON format)
+- `data/benchmark_template.jsonl` — Retrieval + answer benchmark seed
+- `data/README.md` — Benchmark schema and workflow
 - `output/` — Trained LoRA adapters
+
+## Recommended Order
+
+Do not start QLoRA first.
+
+Recommended sequence:
+1. build benchmark questions from real Tilon documents
+2. evaluate the current RAG system
+3. tune retrieval / confidence behavior
+4. freeze prompt + context format
+5. then create the QLoRA dataset
+
+Why:
+- RAG must provide the right evidence first
+- QLoRA should improve answer behavior on top of stable evidence retrieval
 
 ## Training Data Format
 
@@ -26,3 +42,13 @@ Each sample must match the prompt format from `app/chat/prompts.py`:
 ```
 
 ## Critical: The context format MUST match `app/retrieval/retriever.py:format_context()`
+
+## Validation
+
+Use this to validate the benchmark file:
+
+```bash
+cd /home/tilon/chatbot-karbi
+source .venv/bin/activate
+python scripts/validate_benchmark.py --path finetuning/data/benchmark_template.jsonl
+```

@@ -216,6 +216,7 @@ function loadChats(){
     for(const id of Object.keys(chats)){
         if(!Array.isArray(chats[id].messages))chats[id].messages=[];
         if(typeof chats[id].activeSource!=='string')chats[id].activeSource='';
+        if(typeof chats[id].activeDocId!=='string')chats[id].activeDocId='';
     }
 }
 function saveChats(){
@@ -224,7 +225,7 @@ function saveChats(){
 
 function newChat(){
     currentChatId='chat_'+Date.now();
-    chats[currentChatId]={title:'New Chat',messages:[],activeSource:''};
+    chats[currentChatId]={title:'New Chat',messages:[],activeSource:'',activeDocId:''};
     saveChats();
     messagesEl.innerHTML='';
     renderActiveSource();
@@ -287,6 +288,15 @@ function renderActiveSource(){
 function setActiveSource(source){
     if(!currentChatId||!chats[currentChatId])return;
     chats[currentChatId].activeSource=source||'';
+    if(!source)chats[currentChatId].activeDocId='';
+    saveChats();
+    renderActiveSource();
+}
+
+function setActiveDocument(source,docId){
+    if(!currentChatId||!chats[currentChatId])return;
+    chats[currentChatId].activeSource=source||'';
+    chats[currentChatId].activeDocId=docId||'';
     saveChats();
     renderActiveSource();
 }
@@ -337,6 +347,7 @@ async function sendMessage(){
     const displayText=text||(file?'Analyze this document':'');
     const selectedModel=modelSelect.value;
     const activeSource=chats[currentChatId].activeSource||'';
+    const activeDocId=chats[currentChatId].activeDocId||'';
 
     appendMessageDOM('user',displayText,null,null,file?file.name:null);
     pushMessage('user',displayText,null,null,file?file.name:null);
@@ -355,7 +366,7 @@ async function sendMessage(){
             const resp=await fetch('/chat-with-file',{method:'POST',body:fd});
             data=await resp.json();
             if(!resp.ok){showError(data.detail||'Upload failed');return;}
-            setActiveSource(data.active_source||file.name);
+            setActiveDocument(data.active_source||file.name,data.active_doc_id||'');
             if(data.ingest&&data.ingest.count>0){
                 appendMessageDOM('system',file.name+' — '+data.ingest.count+' chunks ingested');
                 pushMessage('system',file.name+' — '+data.ingest.count+' chunks ingested');
@@ -364,11 +375,22 @@ async function sendMessage(){
             const history=chats[currentChatId].messages.filter(m=>m.role==='user'||m.role==='assistant').slice(-8);
             const resp=await fetch('/chat',{
                 method:'POST',headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({message:text,history:history,model:selectedModel,active_source:activeSource||null})
+                body:JSON.stringify({
+                    message:text,
+                    history:history,
+                    model:selectedModel,
+                    active_source:activeSource||null,
+                    active_doc_id:activeDocId||null
+                })
             });
             data=await resp.json();
             if(!resp.ok){showError(data.detail||'Error');return;}
-            if(Object.prototype.hasOwnProperty.call(data,'active_source'))setActiveSource(data.active_source||'');
+            if(
+                Object.prototype.hasOwnProperty.call(data,'active_source')
+                || Object.prototype.hasOwnProperty.call(data,'active_doc_id')
+            ){
+                setActiveDocument(data.active_source||'',data.active_doc_id||'');
+            }
         }
         appendMessageDOM('assistant',data.answer,data.sources,data.mode);
         pushMessage('assistant',data.answer,data.sources,data.mode);
@@ -393,7 +415,13 @@ function appendMessageDOM(role,content,sources,mode,fileName){
     let fileHtml=fileName?`<div class="file-badge">&#128206; ${esc(fileName)}</div>`:'';
     let modeHtml=mode?`<span class="mode-tag">${esc(mode)}</span>`:'';
     let srcHtml='';
-    if(sources&&sources.length){srcHtml='<div class="sources">'+sources.map(s=>`<span class="source-tag">${esc(s.source||'?')} p.${s.page||'?'}</span>`).join('')+'</div>';}
+    if(sources&&sources.length){
+        srcHtml='<div class="sources">'+sources.map(s=>{
+            const label=`${s.source||'?'} p.${s.page||'?'}`;
+            const title=[s.doc_id||'',s.source_type||''].filter(Boolean).join(' | ');
+            return `<span class="source-tag" title="${esc(title)}">${esc(label)}</span>`;
+        }).join('')+'</div>';
+    }
     const w=document.createElement('div');w.className='msg-wrap';
     w.innerHTML=`<div class="message ${role}"><div class="avatar">${av[role]||'?'}</div><div class="body"><div class="sender">${nm[role]||role} ${modeHtml}</div>${fileHtml}<div class="content">${esc(content)}</div>${srcHtml}</div></div>`;
     messagesEl.appendChild(w);scrollBottom();
@@ -436,8 +464,20 @@ async function loadDocs(){
     try{
         const resp=await fetch('/docs-list');const data=await resp.json();
         if(!data.documents||!data.documents.length){dl.innerHTML='<div class="drawer-empty">No documents stored</div>';return;}
-        const g={};for(const d of data.documents){const s=d.source||'?';if(!g[s])g[s]=0;g[s]++;}
-        dl.innerHTML='';for(const[s,c]of Object.entries(g)){const d=document.createElement('div');d.className='drawer-doc';d.innerHTML=`<span class="name">${esc(s)}</span><span class="chunks">${c}</span>`;dl.appendChild(d);}
+        const g={};
+        for(const d of data.documents){
+            const key=d.doc_id||`${d.source||'?'}::${d.source_type||''}`;
+            if(!g[key])g[key]={source:d.source||'?',sourceType:d.source_type||'',chunks:0,pageTotal:d.page_total||''};
+            g[key].chunks++;
+        }
+        dl.innerHTML='';
+        for(const item of Object.values(g)){
+            const subtitle=[item.sourceType,item.pageTotal?`${item.pageTotal}p`:'' ].filter(Boolean).join(' • ');
+            const d=document.createElement('div');
+            d.className='drawer-doc';
+            d.innerHTML=`<div style="display:flex;flex-direction:column;min-width:0;flex:1"><span class="name">${esc(item.source)}</span>${subtitle?`<span style="font-size:.68rem;color:#94a3b8">${esc(subtitle)}</span>`:''}</div><span class="chunks">${item.chunks}</span>`;
+            dl.appendChild(d);
+        }
     }catch{dl.innerHTML='<div class="drawer-empty">Error</div>';}
 }
 
@@ -445,7 +485,10 @@ async function resetDB(){
     if(!confirm('Reset vector DB? All documents deleted.'))return;
     try{
         await fetch('/reset-db',{method:'DELETE'});
-        for(const id of Object.keys(chats)){chats[id].activeSource='';}
+        for(const id of Object.keys(chats)){
+            chats[id].activeSource='';
+            chats[id].activeDocId='';
+        }
         saveChats();
         renderActiveSource();
         appendMessageDOM('system','Vector DB reset.');

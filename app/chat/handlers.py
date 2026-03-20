@@ -17,11 +17,16 @@ from typing import List, Dict, Any, Optional
 from app.models.schemas import Message
 from app.core.llm import call_ollama, get_response_text
 from app.retrieval.retriever import retrieve, format_context, extract_sources
-from app.core.vectorstore import get_documents_by_source
-from app.config import OLLAMA_MODEL, TAVILY_API_KEY
+from app.core.vectorstore import get_documents_by_source, get_document_chunk_count
+from app.config import (
+    OLLAMA_MODEL,
+    TAVILY_API_KEY,
+    DOCUMENT_CONFIDENCE_THRESHOLD,
+    SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD,
+    SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS,
+)
 
 logger = logging.getLogger("tilon.chat")
-DOCUMENT_CONFIDENCE_THRESHOLD = 0.45
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -95,9 +100,13 @@ def _is_smalltalk_query(text: str) -> bool:
     return any(keyword in lower for keyword in indicators)
 
 
-def _document_not_found_answer(user_message: str, active_source: Optional[str]) -> str:
+def _document_not_found_answer(
+    user_message: str,
+    active_source: Optional[str],
+    active_doc_id: Optional[str] = None,
+) -> str:
     """Return a grounded fallback when scoped retrieval confidence is too low."""
-    source_name = active_source or "the uploaded document"
+    source_name = active_source or active_doc_id or "the uploaded document"
     if re.search(r"[가-힣]", user_message):
         return (
             f"업로드된 문서 '{source_name}'에서 질문과 관련된 정보를 찾지 못했습니다. "
@@ -126,7 +135,7 @@ def _strip_enrichment_header(text: str) -> str:
     return re.sub(r'^\[Document:.*?\]\n', '', text or '', flags=re.DOTALL).strip()
 
 
-def _build_direct_extraction_answer(active_source: str, docs) -> str:
+def _build_direct_extraction_answer(active_source: Optional[str], docs) -> str:
     """Return extracted document text directly for OCR/transcription requests."""
     extracted = "\n\n".join(
         _strip_enrichment_header(doc.page_content)
@@ -135,11 +144,48 @@ def _build_direct_extraction_answer(active_source: str, docs) -> str:
     ).strip()
 
     if not extracted:
-        return _document_not_found_answer("extract text", active_source)
+        fallback_source = active_source or (docs[0].metadata.get("source") if docs else None)
+        fallback_doc_id = docs[0].metadata.get("doc_id") if docs else None
+        return _document_not_found_answer("extract text", fallback_source, fallback_doc_id)
 
     if re.search(r"[가-힣]", extracted):
         return f"추출된 텍스트:\n\n{extracted}"
     return f"Extracted text:\n\n{extracted}"
+
+
+def _scoped_confidence_threshold(docs) -> float:
+    """
+    Use a slightly lower threshold for tiny uploaded docs where one chunk is
+    effectively the whole document (e.g. a screenshot or one-page upload).
+    """
+    if len(docs) != 1:
+        return DOCUMENT_CONFIDENCE_THRESHOLD
+
+    meta = docs[0].metadata
+    if meta.get("source_type") == "upload":
+        return SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD
+
+    return DOCUMENT_CONFIDENCE_THRESHOLD
+
+
+def _should_force_small_doc_full_context(
+    active_source: Optional[str],
+    active_doc_id: Optional[str],
+) -> bool:
+    """Use full-document context for tiny scoped docs where top-k retrieval is brittle."""
+    if not active_source and not active_doc_id:
+        return False
+
+    try:
+        chunk_count = get_document_chunk_count(source=active_source, doc_id=active_doc_id)
+    except Exception as e:
+        logger.debug("Could not inspect scoped document chunk count: %s", e)
+        return False
+
+    if chunk_count <= 0:
+        return False
+
+    return chunk_count <= SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -201,6 +247,7 @@ def handle_chat(
     history: List[Message] = None,
     model: str = None,
     active_source: str = None,
+    active_doc_id: str = None,
     system_prompt: str = None,
 ) -> Dict[str, Any]:
     """
@@ -210,52 +257,70 @@ def handle_chat(
         user_message: What the user said
         history: Conversation history
         model: Which Ollama model to use
-        active_source: Active document scope for the current chat, if any
+        active_source: Active document filename scope for the current chat, if any
+        active_doc_id: Stable document ID scope for the current chat, if any
         system_prompt: Override default system prompt
     """
     history = history or []
     selected_model = model or OLLAMA_MODEL
     scoped_source = None if _is_smalltalk_query(user_message) else active_source
+    scoped_doc_id = None if _is_smalltalk_query(user_message) else active_doc_id
 
-    if scoped_source and _is_direct_extraction_query(user_message):
-        docs = get_documents_by_source(scoped_source)
+    if (scoped_source or scoped_doc_id) and _is_direct_extraction_query(user_message):
+        docs = get_documents_by_source(source=scoped_source, doc_id=scoped_doc_id)
         if docs:
-            logger.info("Direct extraction response for '%s'", scoped_source)
+            logger.info(
+                "Direct extraction response for '%s'%s",
+                scoped_source or "scoped document",
+                f" ({scoped_doc_id})" if scoped_doc_id else "",
+            )
             return {
                 "answer": _build_direct_extraction_answer(scoped_source, docs),
                 "sources": extract_sources(docs),
                 "mode": "ocr_extract",
                 "active_source": scoped_source,
+                "active_doc_id": scoped_doc_id,
             }
 
     # ── Step 1: Always search for relevant document context ──
     doc_context = ""
     sources = []
 
-    use_full_document = bool(scoped_source and _needs_full_document_context(user_message))
+    use_full_document = bool(
+        (scoped_source or scoped_doc_id)
+        and (
+            _needs_full_document_context(user_message)
+            or _should_force_small_doc_full_context(scoped_source, scoped_doc_id)
+        )
+    )
     retrieval = retrieve(
         user_message,
         source_filter=scoped_source,
+        doc_id_filter=scoped_doc_id,
         full_document=use_full_document,
     )
     docs = retrieval.docs
 
-    if scoped_source and not use_full_document:
+    if (scoped_source or scoped_doc_id) and not use_full_document:
+        threshold = _scoped_confidence_threshold(docs) if docs else DOCUMENT_CONFIDENCE_THRESHOLD
         if not docs or (
-            retrieval.confidence < DOCUMENT_CONFIDENCE_THRESHOLD
+            retrieval.confidence < threshold
             and not retrieval.strong_keyword_hit
         ):
             logger.info(
-                "Low-confidence scoped retrieval for '%s' (confidence=%.2f, keyword_hit=%s)",
-                active_source,
+                "Low-confidence scoped retrieval for '%s'%s (confidence=%.2f, threshold=%.2f, keyword_hit=%s)",
+                active_source or "scoped document",
+                f" ({scoped_doc_id})" if scoped_doc_id else "",
                 retrieval.confidence,
+                threshold,
                 retrieval.strong_keyword_hit,
             )
             return {
-                "answer": _document_not_found_answer(user_message, active_source),
+                "answer": _document_not_found_answer(user_message, active_source, active_doc_id),
                 "sources": [],
                 "mode": "document_qa",
                 "active_source": active_source,
+                "active_doc_id": active_doc_id,
             }
 
     if docs:
@@ -271,7 +336,11 @@ def handle_chat(
             logger.info(
                 "Found %d relevant chunks%s (confidence=%.2f, keyword_hit=%s)",
                 len(docs),
-                f" (scoped to '{scoped_source}')" if scoped_source else "",
+                (
+                    f" (scoped to '{scoped_source}'"
+                    + (f", {scoped_doc_id}" if scoped_doc_id else "")
+                    + ")"
+                ) if (scoped_source or scoped_doc_id) else "",
                 retrieval.confidence,
                 retrieval.strong_keyword_hit,
             )
@@ -310,4 +379,5 @@ def handle_chat(
         "sources": sources,
         "mode": mode,
         "active_source": active_source,
+        "active_doc_id": active_doc_id,
     }

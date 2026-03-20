@@ -12,6 +12,9 @@ venv/
 chroma_db/
 marker_output/
 finetuning/output/
+data/uploads/
+data/temp/
+data/document_registry.json
 *.gguf
 *.bin
 *.safetensors

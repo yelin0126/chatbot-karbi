@@ -58,6 +58,7 @@ class InMemoryBM25Index:
         query: str,
         k: int = 4,
         source_filter: Optional[str] = None,
+        doc_id_filter: Optional[str] = None,
     ) -> List[Tuple[Document, float]]:
         query_tokens = tokenize_text(query)
         if not query_tokens or not self._documents:
@@ -68,6 +69,8 @@ class InMemoryBM25Index:
 
         for doc, doc_tokens in zip(self._documents, self._tokenized_docs):
             if source_filter and doc.metadata.get("source") != source_filter:
+                continue
+            if doc_id_filter and doc.metadata.get("doc_id") != doc_id_filter:
                 continue
             if not doc_tokens:
                 continue
@@ -117,5 +120,11 @@ def search_keyword_index(
     query: str,
     k: int = 4,
     source_filter: Optional[str] = None,
+    doc_id_filter: Optional[str] = None,
 ) -> List[Tuple[Document, float]]:
-    return _keyword_index.search(query=query, k=k, source_filter=source_filter)
+    return _keyword_index.search(
+        query=query,
+        k=k,
+        source_filter=source_filter,
+        doc_id_filter=doc_id_filter,
+    )

@@ -13,7 +13,12 @@ from typing import List, Dict, Any, Tuple
 
 from langchain_core.documents import Document
 
-from app.config import VECTOR_TOP_K, RERANKER_ENABLED
+from app.config import (
+    VECTOR_TOP_K,
+    RERANKER_ENABLED,
+    GLOBAL_MIN_RELEVANCE_SCORE,
+    STRONG_KEYWORD_CONFIDENCE_FLOOR,
+)
 from app.core.vectorstore import (
     similarity_search_with_scores,
     get_documents_by_source,
@@ -23,8 +28,6 @@ from app.retrieval.reranker import rerank
 
 logger = logging.getLogger("tilon.retriever")
 
-
-MIN_RELEVANCE_SCORE = 0.3  # Below this = probably irrelevant
 RRF_K = 60
 
 
@@ -39,6 +42,7 @@ class RetrievalResult:
 def retrieve(
     query: str,
     source_filter: str = None,
+    doc_id_filter: str = None,
     full_document: bool = False,
 ) -> RetrievalResult:
     """
@@ -48,12 +52,13 @@ def retrieve(
     When no filter (general chat): filter out low-relevance results so
     "hello" doesn't return random document chunks.
     """
-    if source_filter and full_document:
-        docs = get_documents_by_source(source_filter)
+    if (source_filter or doc_id_filter) and full_document:
+        docs = get_documents_by_source(source=source_filter, doc_id=doc_id_filter)
         logger.info(
-            "Loaded %d chunks for whole-document task from '%s'",
+            "Loaded %d chunks for whole-document task from '%s'%s",
             len(docs),
-            source_filter,
+            source_filter or "scoped document",
+            f" ({doc_id_filter})" if doc_id_filter else "",
         )
         return RetrievalResult(
             docs=docs,
@@ -65,24 +70,31 @@ def retrieve(
     fetch_k = VECTOR_TOP_K * 2 if RERANKER_ENABLED else VECTOR_TOP_K
 
     # Only apply score filtering when NOT scoped to a specific file
-    min_score = None if source_filter else MIN_RELEVANCE_SCORE
+    min_score = None if (source_filter or doc_id_filter) else GLOBAL_MIN_RELEVANCE_SCORE
 
     vector_results = similarity_search_with_scores(
         query,
         k=fetch_k,
         filter_source=source_filter,
+        filter_doc_id=doc_id_filter,
         min_score=min_score,
     )
     keyword_results = search_keyword_index(
         query,
         k=fetch_k,
         source_filter=source_filter,
+        doc_id_filter=doc_id_filter,
     )
 
     merged = _fuse_results(vector_results, keyword_results, limit=fetch_k)
     docs = [entry["doc"] for entry in merged]
 
-    scope = f" (scoped to '{source_filter}')" if source_filter else ""
+    scope_parts = []
+    if source_filter:
+        scope_parts.append(f"source='{source_filter}'")
+    if doc_id_filter:
+        scope_parts.append(f"doc_id='{doc_id_filter}'")
+    scope = f" (scoped to {', '.join(scope_parts)})" if scope_parts else ""
     logger.info(
         "Hybrid retrieval: %d vector + %d keyword -> %d merged for '%s'%s",
         len(vector_results),
@@ -92,11 +104,13 @@ def retrieve(
         scope,
     )
 
-    if RERANKER_ENABLED and docs:
+    if RERANKER_ENABLED and len(docs) > 1:
         docs = rerank(query, docs)
         logger.info("After reranking: %d documents", len(docs))
+    elif docs:
+        logger.info("Skipping reranker for %d retrieved document(s)", len(docs))
 
-    strong_keyword_hit = _has_strong_keyword_hit(query, keyword_results)
+    strong_keyword_hit = _has_strong_keyword_hit(query, keyword_results, doc_id_filter=doc_id_filter)
     confidence = _estimate_confidence(vector_results, merged, strong_keyword_hit)
 
     return RetrievalResult(
@@ -111,7 +125,7 @@ def _doc_key(doc: Document) -> str:
     meta = doc.metadata
     return str(
         meta.get("chunk_id")
-        or f"{meta.get('source')}::{meta.get('page')}::{meta.get('chunk_index')}"
+        or f"{meta.get('doc_id') or meta.get('source')}::{meta.get('page')}::{meta.get('chunk_index')}"
     )
 
 
@@ -170,6 +184,7 @@ def _fuse_results(
 def _has_strong_keyword_hit(
     query: str,
     keyword_results: List[Tuple[Document, float]],
+    doc_id_filter: str = None,
 ) -> bool:
     if not keyword_results:
         return False
@@ -190,6 +205,9 @@ def _has_strong_keyword_hit(
     if exact_technical:
         return True
 
+    if doc_id_filter and len(matches) >= 1:
+        return True
+
     return len(matches) >= min(len(query_tokens), 2)
 
 
@@ -205,7 +223,7 @@ def _estimate_confidence(
         confidence = max(confidence, min(1.0, top_vector_score + 0.15))
 
     if strong_keyword_hit:
-        confidence = max(confidence, 0.75)
+        confidence = max(confidence, STRONG_KEYWORD_CONFIDENCE_FLOOR)
 
     return min(confidence, 1.0)
 
@@ -249,7 +267,10 @@ def extract_sources(docs: List[Document]) -> List[Dict[str, Any]]:
     """Extract source metadata from documents for API response."""
     return [
         {
+            "doc_id": d.metadata.get("doc_id"),
             "source": d.metadata.get("source"),
+            "source_type": d.metadata.get("source_type"),
+            "source_path": d.metadata.get("source_path"),
             "page": d.metadata.get("page"),
             "section": d.metadata.get("section_breadcrumb", "") or d.metadata.get("section_title", ""),
             "chunk_index": d.metadata.get("chunk_index"),
