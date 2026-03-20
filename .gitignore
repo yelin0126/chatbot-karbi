@@ -13,8 +13,10 @@ chroma_db/
 marker_output/
 finetuning/output/
 finetuning/results/
-data/uploads/
-data/temp/
+data/uploads/*
+!data/uploads/.gitkeep
+data/temp/*
+!data/temp/.gitkeep
 data/document_registry.json
 *.gguf
 *.bin
