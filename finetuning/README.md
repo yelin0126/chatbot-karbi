@@ -52,3 +52,26 @@ cd /home/tilon/chatbot-karbi
 source .venv/bin/activate
 python scripts/validate_benchmark.py --path finetuning/data/benchmark_template.jsonl
 ```
+
+## Run Benchmark
+
+Run the benchmark against the current system:
+
+```bash
+cd /home/tilon/chatbot-karbi
+source .venv/bin/activate
+python scripts/run_benchmark.py --path finetuning/data/benchmark_template.jsonl --mode both
+```
+
+Useful variants:
+
+```bash
+python scripts/run_benchmark.py --mode retrieval
+python scripts/run_benchmark.py --mode answer
+python scripts/run_benchmark.py --id tilon-001 --id tilon-004
+```
+
+Outputs are written to:
+
+- `finetuning/results/benchmark_results_*.jsonl`
+- `finetuning/results/benchmark_summary_*.json`
