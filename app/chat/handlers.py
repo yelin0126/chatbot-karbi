@@ -118,6 +118,46 @@ def _document_not_found_answer(
     )
 
 
+def _infer_target_language(text: str) -> str:
+    """Infer the user's requested answer language from the current message."""
+    if re.search(r"[가-힣]", text or ""):
+        return "ko"
+    if re.search(r"[A-Za-z]", text or ""):
+        return "en"
+    return "same"
+
+
+def _contains_chinese(text: str) -> bool:
+    """Detect Chinese Han characters that should not appear in normal answers."""
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _needs_language_retry(user_message: str, answer: str) -> bool:
+    """Retry if the model drifted into Chinese despite explicit instructions."""
+    target_lang = _infer_target_language(user_message)
+    if target_lang not in {"ko", "en"}:
+        return False
+    return _contains_chinese(answer)
+
+
+def _language_correction_prompt(
+    original_prompt: str,
+    user_message: str,
+    bad_answer: str,
+) -> str:
+    target_lang = _infer_target_language(user_message)
+    lang_name = "Korean" if target_lang == "ko" else "English"
+    return (
+        f"{original_prompt}\n\n"
+        "[Critical correction]\n"
+        f"The previous draft answer was invalid because it used Chinese characters.\n"
+        f"Rewrite the final answer entirely in {lang_name}.\n"
+        "Do not use any Chinese characters.\n"
+        "Keep the same facts and stay grounded in the provided context.\n\n"
+        f"[Invalid draft answer]\n{bad_answer}"
+    )
+
+
 def _is_direct_extraction_query(text: str) -> bool:
     """Detect requests that want raw OCR/text output from the uploaded file."""
     lower = text.lower().strip()
@@ -126,6 +166,17 @@ def _is_direct_extraction_query(text: str) -> bool:
         "what does this image say", "what does the image say",
         "give me the text", "extract the text", "read the text",
         "read this image", "text in the image", "transcribe",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _needs_section_understanding_style(text: str) -> bool:
+    """Detect prompts asking for the role/meaning of a section rather than raw lookup."""
+    lower = text.lower().strip()
+    indicators = [
+        "어떤 역할", "무슨 역할", "어떤 의미", "무슨 의미", "설명해줘", "설명해 줘",
+        "차이", "구분", "성격", "의미를", "역할을", "what role", "what does this section do",
+        "what does it mean", "explain the section", "difference between", "how is it different",
     ]
     return any(keyword in lower for keyword in indicators)
 
@@ -166,6 +217,39 @@ def _scoped_confidence_threshold(docs) -> float:
         return SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD
 
     return DOCUMENT_CONFIDENCE_THRESHOLD
+
+
+def _scoped_confidence_threshold_for_query(
+    user_message: str,
+    docs,
+    active_source: Optional[str],
+    active_doc_id: Optional[str],
+) -> float:
+    """
+    Lower the gate slightly for cross-language document QA where the right doc was found
+    but semantic similarity can be lower (e.g. English query over Korean policy text).
+    """
+    base_threshold = _scoped_confidence_threshold(docs)
+    if not docs:
+        return base_threshold
+
+    query_lang = _infer_target_language(user_message)
+    doc_langs = {
+        str(doc.metadata.get("language", "")).lower()
+        for doc in docs
+        if doc.metadata.get("language")
+    }
+
+    is_cross_language = (
+        query_lang == "en" and "ko" in doc_langs
+    ) or (
+        query_lang == "ko" and "en" in doc_langs
+    )
+
+    if is_cross_language and (active_source or active_doc_id):
+        return max(0.25, base_threshold - 0.12)
+
+    return base_threshold
 
 
 def _should_force_small_doc_full_context(
@@ -222,6 +306,23 @@ def _build_prompt(
 ) -> str:
     """Build a single unified prompt with all available context."""
     parts = [f"[System]\n{system_prompt or _SYSTEM_PROMPT}"]
+    target_lang = _infer_target_language(user_message)
+    if target_lang == "ko":
+        parts.append("[Required response language]\nKorean only. Do not use Chinese characters.")
+    elif target_lang == "en":
+        parts.append("[Required response language]\nEnglish only. Do not use Chinese characters.")
+        parts.append(
+            "[Cross-language instruction]\n"
+            "If the retrieved document evidence is in Korean, translate and explain it in English. "
+            "Do not refuse only because the source document is in another language."
+        )
+    if _needs_section_understanding_style(user_message):
+        parts.append(
+            "[Task style]\n"
+            "Answer as a section-understanding question. "
+            "Explain the role, purpose, differences, or kinds of support described in the document. "
+            "Name concrete items from the evidence instead of giving only a generic summary."
+        )
 
     history_text = _format_history(history)
     if history_text:
@@ -302,7 +403,14 @@ def handle_chat(
     docs = retrieval.docs
 
     if (scoped_source or scoped_doc_id) and not use_full_document:
-        threshold = _scoped_confidence_threshold(docs) if docs else DOCUMENT_CONFIDENCE_THRESHOLD
+        threshold = (
+            _scoped_confidence_threshold_for_query(
+                user_message,
+                docs,
+                scoped_source,
+                scoped_doc_id,
+            ) if docs else DOCUMENT_CONFIDENCE_THRESHOLD
+        )
         if not docs or (
             retrieval.confidence < threshold
             and not retrieval.strong_keyword_hit
@@ -366,6 +474,14 @@ def handle_chat(
 
     result = call_ollama(prompt, model=selected_model)
     answer = get_response_text(result)
+
+    if _needs_language_retry(user_message, answer):
+        logger.warning("Language drift detected; retrying answer generation without Chinese output")
+        retry_prompt = _language_correction_prompt(prompt, user_message, answer)
+        retry_result = call_ollama(retry_prompt, model=selected_model)
+        retry_answer = get_response_text(retry_result)
+        if retry_answer:
+            answer = retry_answer
 
     # Determine what was used (for UI display)
     mode = "general"

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -35,6 +36,11 @@ from app.retrieval.retriever import extract_sources, retrieve
 DEFAULT_BENCHMARK = "finetuning/data/benchmark_template.jsonl"
 DEFAULT_RESULTS_DIR = "finetuning/results"
 SUMMARY_CATEGORIES_FULL_DOC = {"summary", "section_understanding"}
+_ANSWER_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "into", "only",
+    "문서", "내용", "관련", "대한", "해야", "합니다", "한다", "되어야", "있다", "있는",
+    "또는", "포함", "언급", "기반", "답해야", "좋음", "점", "것", "수", "로", "을", "를",
+}
 
 
 @dataclass
@@ -103,13 +109,32 @@ def normalize_text(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
-def score_answer_points(answer: str, expected_points: list[str]) -> dict[str, Any]:
+def _extract_keywords(text: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]+|[가-힣]{2,}", normalize_text(text))
+    return [tok for tok in tokens if tok not in _ANSWER_STOPWORDS]
+
+
+def _point_matches(answer: str, point: str) -> bool:
     normalized_answer = normalize_text(answer)
+    normalized_point = normalize_text(point)
+    if normalized_point and normalized_point in normalized_answer:
+        return True
+
+    keywords = _extract_keywords(point)
+    if not keywords:
+        return False
+
+    hits = sum(1 for keyword in keywords if keyword in normalized_answer)
+    if len(keywords) <= 2:
+        return hits == len(keywords)
+    return hits >= max(2, len(keywords) - 1)
+
+
+def score_answer_points(answer: str, expected_points: list[str]) -> dict[str, Any]:
     hits = []
     misses = []
     for point in expected_points:
-        normalized_point = normalize_text(point)
-        if normalized_point and normalized_point in normalized_answer:
+        if _point_matches(answer, point):
             hits.append(point)
         else:
             misses.append(point)
@@ -165,8 +190,22 @@ def detect_refusal(answer: str) -> bool:
     indicators = [
         "couldn't find relevant information",
         "not found in the document",
+        "could not find relevant information",
+        "i couldn't find",
+        "i could not find",
+        "not mentioned in the document",
+        "not described in the document",
+        "not specified in the document",
         "제공된 문서에서 확인되지 않습니다",
         "질문과 관련된 정보를 찾지 못했습니다",
+        "문서에서 찾을 수 없습니다",
+        "문서에서 확인할 수 없습니다",
+        "문서에 나와 있지 않습니다",
+        "문서에 언급되어 있지 않습니다",
+        "확인되지 않습니다",
+        "확인할 수 없습니다",
+        "찾을 수 없습니다",
+        "언급되어 있지 않습니다",
     ]
     return any(token in lower for token in indicators)
 
