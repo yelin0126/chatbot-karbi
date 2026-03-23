@@ -34,24 +34,49 @@ class InMemoryBM25Index:
         self._tokenized_docs: List[List[str]] = []
         self._doc_freq: Counter = Counter()
         self._avg_doc_len = 0.0
+        self._total_doc_len = 0
 
     def rebuild(self, docs: List[Document]) -> None:
         self._documents = list(docs)
         self._tokenized_docs = [tokenize_text(doc.page_content) for doc in self._documents]
         self._doc_freq = Counter()
 
-        total_len = 0
+        self._total_doc_len = 0
         for tokens in self._tokenized_docs:
-            total_len += len(tokens)
+            self._total_doc_len += len(tokens)
             self._doc_freq.update(set(tokens))
 
-        self._avg_doc_len = total_len / len(self._tokenized_docs) if self._tokenized_docs else 0.0
+        self._avg_doc_len = (
+            self._total_doc_len / len(self._tokenized_docs)
+            if self._tokenized_docs
+            else 0.0
+        )
         logger.info("Keyword index rebuilt with %d chunks", len(self._documents))
 
     def add_documents(self, docs: List[Document]) -> None:
+        """
+        Incrementally add docs without rebuilding the entire index.
+        This avoids O(N^2) behavior during multi-file uploads.
+        """
         if not docs:
             return
-        self.rebuild(self._documents + list(docs))
+
+        added = 0
+        for doc in docs:
+            tokens = tokenize_text(doc.page_content)
+            self._documents.append(doc)
+            self._tokenized_docs.append(tokens)
+            self._doc_freq.update(set(tokens))
+            self._total_doc_len += len(tokens)
+            added += 1
+
+        total_docs = len(self._tokenized_docs)
+        self._avg_doc_len = (self._total_doc_len / total_docs) if total_docs else 0.0
+        logger.info(
+            "Keyword index incrementally updated (+%d chunks, total=%d)",
+            added,
+            len(self._documents),
+        )
 
     def search(
         self,
@@ -59,6 +84,7 @@ class InMemoryBM25Index:
         k: int = 4,
         source_filter: Optional[str] = None,
         doc_id_filter: Optional[str] = None,
+        source_type_filter: Optional[str] = None,
     ) -> List[Tuple[Document, float]]:
         query_tokens = tokenize_text(query)
         if not query_tokens or not self._documents:
@@ -71,6 +97,8 @@ class InMemoryBM25Index:
             if source_filter and doc.metadata.get("source") != source_filter:
                 continue
             if doc_id_filter and doc.metadata.get("doc_id") != doc_id_filter:
+                continue
+            if source_type_filter and doc.metadata.get("source_type") != source_type_filter:
                 continue
             if not doc_tokens:
                 continue
@@ -121,10 +149,12 @@ def search_keyword_index(
     k: int = 4,
     source_filter: Optional[str] = None,
     doc_id_filter: Optional[str] = None,
+    source_type_filter: Optional[str] = None,
 ) -> List[Tuple[Document, float]]:
     return _keyword_index.search(
         query=query,
         k=k,
         source_filter=source_filter,
         doc_id_filter=doc_id_filter,
+        source_type_filter=source_type_filter,
     )

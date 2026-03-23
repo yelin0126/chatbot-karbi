@@ -20,6 +20,8 @@ from app.config import (
     LLM_TEMPERATURE,
     LLM_MAX_TOKENS,
     LLM_TIMEOUT,
+    LLM_REPEAT_PENALTY,
+    LLM_REPEAT_LAST_N,
 )
 
 logger = logging.getLogger("tilon.llm")
@@ -49,6 +51,8 @@ def call_ollama(
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
+            "repeat_penalty": LLM_REPEAT_PENALTY,
+            "repeat_last_n": LLM_REPEAT_LAST_N,
         },
     }
 

@@ -43,6 +43,7 @@ def retrieve(
     query: str,
     source_filter: str = None,
     doc_id_filter: str = None,
+    source_type_filter: str = None,
     full_document: bool = False,
 ) -> RetrievalResult:
     """
@@ -70,13 +71,14 @@ def retrieve(
     fetch_k = VECTOR_TOP_K * 2 if RERANKER_ENABLED else VECTOR_TOP_K
 
     # Only apply score filtering when NOT scoped to a specific file
-    min_score = None if (source_filter or doc_id_filter) else GLOBAL_MIN_RELEVANCE_SCORE
+    min_score = None if (source_filter or doc_id_filter or source_type_filter) else GLOBAL_MIN_RELEVANCE_SCORE
 
     vector_results = similarity_search_with_scores(
         query,
         k=fetch_k,
         filter_source=source_filter,
         filter_doc_id=doc_id_filter,
+        filter_source_type=source_type_filter,
         min_score=min_score,
     )
     keyword_results = search_keyword_index(
@@ -84,6 +86,7 @@ def retrieve(
         k=fetch_k,
         source_filter=source_filter,
         doc_id_filter=doc_id_filter,
+        source_type_filter=source_type_filter,
     )
 
     merged = _fuse_results(vector_results, keyword_results, limit=fetch_k)
@@ -94,6 +97,8 @@ def retrieve(
         scope_parts.append(f"source='{source_filter}'")
     if doc_id_filter:
         scope_parts.append(f"doc_id='{doc_id_filter}'")
+    if source_type_filter:
+        scope_parts.append(f"source_type='{source_type_filter}'")
     scope = f" (scoped to {', '.join(scope_parts)})" if scope_parts else ""
     logger.info(
         "Hybrid retrieval: %d vector + %d keyword -> %d merged for '%s'%s",

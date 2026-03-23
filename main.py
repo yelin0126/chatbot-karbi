@@ -11,8 +11,10 @@ IMPROVEMENTS over original:
 """
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.config import (
     setup_logging,
@@ -84,6 +86,10 @@ app = FastAPI(
     description="RAG-based AI Chatbot with PDF parsing, vector retrieval, and QLoRA fine-tuning support.",
     lifespan=lifespan,
 )
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Mount routers
 app.include_router(main_router)

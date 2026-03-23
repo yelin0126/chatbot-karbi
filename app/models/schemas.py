@@ -29,6 +29,8 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     active_source: Optional[str] = None
     active_doc_id: Optional[str] = None
+    active_source_type: Optional[str] = None
+    web_search_enabled: bool = True
 
 
 class SourceInfo(BaseModel):

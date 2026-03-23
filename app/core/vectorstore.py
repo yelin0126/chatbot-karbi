@@ -14,7 +14,11 @@ from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
 from app.config import CHROMA_DIR, VECTOR_TOP_K
-from app.core.embeddings import get_embeddings
+from app.core.embeddings import (
+    get_embeddings,
+    get_embedding_device,
+    switch_embeddings_device,
+)
 from app.retrieval.keyword_index import (
     add_keyword_documents,
     clear_keyword_index,
@@ -24,6 +28,48 @@ from app.retrieval.keyword_index import (
 logger = logging.getLogger("tilon.vectorstore")
 
 _vectorstore: Optional[Chroma] = None
+
+
+def _is_cuda_oom(error: Exception) -> bool:
+    msg = str(error).lower()
+    return "out of memory" in msg and "cuda" in msg
+
+
+def _recreate_vectorstore_with_current_embeddings() -> Chroma:
+    """Recreate Chroma client with the currently active embedding backend."""
+    global _vectorstore
+
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    _vectorstore = Chroma(
+        collection_name="rag_docs",
+        embedding_function=get_embeddings(),
+        persist_directory=str(CHROMA_DIR),
+    )
+    return _vectorstore
+
+
+def _switch_to_cpu_embeddings_due_to_oom(error: Exception) -> bool:
+    """Switch embedding backend to CPU when CUDA OOM is detected."""
+    if not _is_cuda_oom(error):
+        return False
+
+    if get_embedding_device() == "cpu":
+        return False
+
+    logger.warning(
+        "Embedding CUDA OOM detected; switching embeddings to CPU and retrying."
+    )
+
+    try:
+        switch_embeddings_device("cpu")
+        _recreate_vectorstore_with_current_embeddings()
+        return True
+    except Exception as switch_error:
+        logger.error(
+            "Failed to switch embeddings to CPU after CUDA OOM: %s",
+            switch_error,
+        )
+        return False
 
 
 def get_vectorstore() -> Chroma:
@@ -46,9 +92,22 @@ def get_vectorstore() -> Chroma:
 def add_documents(docs: List[Document]) -> int:
     """Add documents to the vectorstore. Returns number added."""
     vs = get_vectorstore()
-    vs.add_documents(docs)
+
+    try:
+        vs.add_documents(docs)
+    except Exception as e:
+        if _switch_to_cpu_embeddings_due_to_oom(e):
+            vs = get_vectorstore()
+            vs.add_documents(docs)
+        else:
+            raise
+
     add_keyword_documents(docs)
-    logger.info("Added %d chunks to vectorstore.", len(docs))
+    logger.info(
+        "Added %d chunks to vectorstore (embedding_device=%s).",
+        len(docs),
+        get_embedding_device(),
+    )
     return len(docs)
 
 
@@ -94,9 +153,17 @@ def similarity_search_with_scores(
 
     try:
         results = vs.similarity_search_with_relevance_scores(query, **kwargs)
-    except Exception:
-        docs = vs.similarity_search(query, **kwargs)
-        results = [(doc, 0.0) for doc in docs]
+    except Exception as e:
+        if _switch_to_cpu_embeddings_due_to_oom(e):
+            vs = get_vectorstore()
+            try:
+                results = vs.similarity_search_with_relevance_scores(query, **kwargs)
+            except Exception:
+                docs = vs.similarity_search(query, **kwargs)
+                results = [(doc, 0.0) for doc in docs]
+        else:
+            docs = vs.similarity_search(query, **kwargs)
+            results = [(doc, 0.0) for doc in docs]
 
     if min_score is not None:
         results = [(doc, score) for doc, score in results if score >= min_score]
@@ -247,6 +314,42 @@ def get_ingested_doc_ids() -> set:
     """Return set of already-ingested stable document IDs."""
     metadata_list = get_all_metadata()
     return {m.get("doc_id") for m in metadata_list if m and m.get("doc_id")}
+
+
+def delete_documents(
+    source: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> int:
+    """Delete chunks that match the given filters. Returns deleted chunk count."""
+    where = _build_where(
+        filter_source=source,
+        filter_doc_id=doc_id,
+        filter_source_type=source_type,
+    )
+    if not where:
+        return 0
+
+    deleted_count = get_document_chunk_count(
+        source=source,
+        doc_id=doc_id,
+        source_type=source_type,
+    )
+    if deleted_count <= 0:
+        return 0
+
+    vs = get_vectorstore()
+    vs._collection.delete(where=where)
+    rebuild_keyword_index(get_all_documents())
+
+    logger.info(
+        "Deleted %d chunks from vectorstore (source=%s, doc_id=%s, source_type=%s)",
+        deleted_count,
+        source,
+        doc_id,
+        source_type,
+    )
+    return deleted_count
 
 
 def reset() -> None:

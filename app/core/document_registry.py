@@ -159,6 +159,50 @@ def list_documents() -> List[Dict[str, Any]]:
     return list(registry.get("documents", []))
 
 
+def remove_documents(
+    doc_id: Optional[str] = None,
+    source: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> int:
+    """Remove registry entries matching all provided filters."""
+    if not any([doc_id, source, source_type]):
+        return 0
+
+    with _registry_lock:
+        registry = _load_registry()
+        docs = registry.get("documents", [])
+        kept = []
+        removed = 0
+
+        for doc in docs:
+            matches = True
+            if doc_id and doc.get("doc_id") != doc_id:
+                matches = False
+            if source and doc.get("source") != source:
+                matches = False
+            if source_type and doc.get("source_type") != source_type:
+                matches = False
+
+            if matches:
+                removed += 1
+            else:
+                kept.append(doc)
+
+        if removed:
+            registry["documents"] = kept
+            _save_registry(registry)
+
+    if removed:
+        logger.info(
+            "Removed %d documents from registry (source=%s, doc_id=%s, source_type=%s)",
+            removed,
+            source,
+            doc_id,
+            source_type,
+        )
+    return removed
+
+
 def clear_document_registry() -> None:
     with _registry_lock:
         _save_registry({"documents": []})

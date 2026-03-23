@@ -10,9 +10,10 @@ IMPROVEMENTS over original:
 
 import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from starlette.concurrency import run_in_threadpool
 
 from app.config import (
     OLLAMA_MODEL,
@@ -31,12 +32,13 @@ from app.models.schemas import (
     SourceInfo,
 )
 from app.core.llm import check_ollama_health
-from app.core.document_registry import clear_document_registry
+from app.core.document_registry import clear_document_registry, remove_documents
 from app.core.watcher import suppress_watcher_for
 from app.core.vectorstore import (
     get_vectorstore,
     get_collection_stats,
     get_all_metadata,
+    delete_documents,
     reset as reset_vectorstore,
 )
 from app.chat.handlers import handle_chat
@@ -110,7 +112,9 @@ def chat(req: ChatRequest):
             model=req.model or OLLAMA_MODEL,
             active_source=req.active_source,
             active_doc_id=req.active_doc_id,
+            active_source_type=req.active_source_type,
             system_prompt=req.system_prompt,
+            web_search_enabled=req.web_search_enabled,
         )
 
         return ChatResponse(
@@ -137,6 +141,7 @@ async def chat_with_file(
     file: UploadFile = File(...),
     message: str = Form(default="이 문서의 내용을 요약해줘"),
     model: str = Form(default=None),
+    web_search_enabled: bool = Form(default=True),
 ):
     """
     Upload a file AND ask a question about it in one request.
@@ -170,9 +175,13 @@ async def chat_with_file(
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
     # Step 2: Ingest into ChromaDB
-    ingest_result = ingest_single_file(save_path)
+    try:
+        ingest_result = await run_in_threadpool(ingest_single_file, save_path)
+    except Exception as e:
+        logger.exception("chat-with-file ingest failed")
+        raise HTTPException(status_code=500, detail=f"File ingest failed: {e}")
 
-    if ingest_result["count"] == 0:
+    if ingest_result.get("count", 0) == 0:
         return {
             "model": OLLAMA_MODEL,
             "answer": f"파일 '{file.filename}'에서 텍스트를 추출하지 못했습니다. "
@@ -186,12 +195,19 @@ async def chat_with_file(
     # Step 3: Answer using the unified handler, scoped to this file
     selected_model = model or OLLAMA_MODEL
 
-    result = handle_chat(
-        user_message=message,
-        model=selected_model,
-        active_source=file.filename,
-        active_doc_id=ingest_result.get("doc_id"),
-    )
+    try:
+        result = handle_chat(
+            user_message=message,
+            model=selected_model,
+            active_source=file.filename,
+            active_doc_id=ingest_result.get("doc_id"),
+            web_search_enabled=web_search_enabled,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("chat-with-file answer generation failed")
+        raise HTTPException(status_code=500, detail=f"chat-with-file failed: {e}")
 
     return {
         "model": selected_model,
@@ -203,7 +219,6 @@ async def chat_with_file(
         "ingest": ingest_result,
         "done": True,
     }
-
 
 # ── Ingest ─────────────────────────────────────────────────────────────
 
@@ -222,6 +237,7 @@ def ingest(req: IngestRequest):
 # ── Upload (NEW) ──────────────────────────────────────────────────────
 
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
+MAX_MULTI_UPLOAD_FILES = 90
 
 @router.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -258,7 +274,7 @@ async def upload_file(file: UploadFile = File(...)):
 
     # Parse, chunk, and store
     try:
-        result = ingest_single_file(save_path)
+        result = await run_in_threadpool(ingest_single_file, save_path)
 
         if result["count"] == 0:
             raise HTTPException(
@@ -283,6 +299,12 @@ async def upload_file(file: UploadFile = File(...)):
 @router.post("/upload-multiple")
 async def upload_multiple_files(files: List[UploadFile] = File(...)):
     """Upload and ingest multiple files at once."""
+    if len(files) > MAX_MULTI_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"한 번에 최대 {MAX_MULTI_UPLOAD_FILES}개 파일만 업로드할 수 있습니다.",
+        )
+
     results = []
 
     for file in files:
@@ -300,7 +322,7 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
                 f.write(content)
             suppress_watcher_for(save_path)
 
-            result = ingest_single_file(save_path)
+            result = await run_in_threadpool(ingest_single_file, save_path)
             results.append({
                 "file": file.filename,
                 "status": "success" if result["count"] > 0 else "failed",
@@ -365,6 +387,52 @@ def docs_list():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"docs-list failed: {e}")
+
+
+@router.delete("/upload-document")
+def delete_upload_document(
+    source: Optional[str] = None,
+    doc_id: Optional[str] = None,
+):
+    """Delete one uploaded document from vectorstore/registry and remove local upload file."""
+    if not source and not doc_id:
+        raise HTTPException(status_code=400, detail="source 또는 doc_id 중 하나는 필요합니다.")
+
+    try:
+        deleted_chunks = delete_documents(
+            source=source,
+            doc_id=doc_id,
+            source_type="upload",
+        )
+        removed_registry = remove_documents(
+            source=source,
+            doc_id=doc_id,
+            source_type="upload",
+        )
+
+        file_deleted = False
+        if source:
+            safe_source = Path(source).name
+            upload_path = UPLOADS_DIR / safe_source
+            if upload_path.exists() and upload_path.is_file():
+                upload_path.unlink()
+                file_deleted = True
+
+        if deleted_chunks == 0 and removed_registry == 0 and not file_deleted:
+            raise HTTPException(status_code=404, detail="삭제할 업로드 문서를 찾지 못했습니다.")
+
+        return {
+            "message": "업로드 파일이 삭제되었습니다.",
+            "deleted_chunks": deleted_chunks,
+            "removed_registry": removed_registry,
+            "file_deleted": file_deleted,
+            "source": source,
+            "doc_id": doc_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"upload-document delete failed: {e}")
 
 
 # ── Keyword Count ──────────────────────────────────────────────────────
