@@ -20,7 +20,7 @@ from app.core.document_registry import infer_source_type, upsert_document
 from app.pipeline.parser import parse_pdf, parse_image
 from app.pipeline.chunker import chunk_documents
 from app.pipeline.enricher import enrich_chunks
-from app.core.vectorstore import add_documents, get_ingested_sources
+from app.core.vectorstore import add_documents, delete_documents, get_ingested_sources
 
 logger = logging.getLogger("tilon.ingest")
 
@@ -86,6 +86,12 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
     # Chunk, enrich, and store
     chunks = chunk_documents(docs)
     chunks = enrich_chunks(chunks)
+    doc_id = docs[0].metadata.get("doc_id") if docs else None
+    source_type = docs[0].metadata.get("source_type") if docs else None
+    if doc_id:
+        replaced = delete_documents(doc_id=doc_id, source_type=source_type)
+        if replaced:
+            logger.info("Replaced %d existing chunks for doc_id=%s", replaced, doc_id)
     add_documents(chunks)
     registry_entry = upsert_document(file_path, docs, len(chunks))
 

@@ -7,9 +7,9 @@ Document-first RAG chatbot for English/Korean PDFs and images. Users can upload 
 The system is now in the middle stage of the product architecture:
 
 - ingestion/parsing: strong and actively improved
-- retrieval: hybrid and document-aware, but still being tuned
+- retrieval: hybrid, document-aware, and benchmarked
 - UI: usable for testing, not production-polished yet
-- QLoRA: planned, but not started as a real training/evaluation workstream yet
+- QLoRA: starter dataset/scaffold created, full training pipeline still pending
 
 What is already working well:
 - text PDFs, scanned PDFs, and images can be uploaded
@@ -18,13 +18,15 @@ What is already working well:
 - retrieval uses vector + keyword search
 - reranking and confidence gating are integrated
 - document identity now uses stable `doc_id`
+- repeated uploads of the same scoped file are deduplicated cleanly
+- bundled upload PDFs with multiple sub-guidelines can now ask for clarification or narrow to the named sub-guideline
+- benchmark baselines now exist for both library docs and upload-scoped chat
 
 What is still not finished:
 - retrieval threshold tuning on real Tilon documents
 - richer block-level structure storage
 - multi-document comparison
-- formal evaluation benchmark
-- QLoRA training pipeline and model comparison
+- full QLoRA training pipeline and model comparison
 
 ## Quick Start
 
@@ -54,8 +56,8 @@ Architecture summary:
 - [ARCHITECTURE.md](/home/tilon/chatbot-karbi/ARCHITECTURE.md)
 
 Why this matters:
-- the current architecture is already good enough to begin structured evaluation
-- the project should now move from local bug-fixing toward benchmark-driven tuning and QLoRA preparation
+- the current architecture is already good enough for structured evaluation
+- the project has moved from one-off debugging into benchmark-driven tuning and QLoRA data preparation
 
 ## Storage Model
 
@@ -116,6 +118,14 @@ QLoRA should not be used to compensate for:
 - wrong retrieval
 - missing evidence
 
+Current evaluation assets:
+- `finetuning/data/benchmark_tilon_v1.jsonl`
+  Library-document benchmark
+- `finetuning/data/benchmark_upload_scoped_v1.jsonl`
+  Upload-scoped / bundled-PDF benchmark
+- `finetuning/data/qlora_train_v1.jsonl`
+  First supervised QLoRA starter set
+
 ## Parsing / Extraction Stack
 
 The parser uses a multi-step extraction pipeline:
@@ -155,6 +165,23 @@ What still needs tuning:
 - when screenshot/image uploads should influence normal chat
 - reranker resource tradeoffs
 - exact-match vs summary behavior across different document types
+- broader upload-scoped evaluation coverage beyond the first bundled-PDF benchmark
+
+## Benchmark Status
+
+Current benchmark baselines:
+- library benchmark: stable
+  - strong source recall
+  - strong answer-point recall
+  - bilingual and not-found coverage
+- upload-scoped benchmark: stable
+  - bundled upload disambiguation
+  - named sub-guideline narrowing
+  - upload-specific not-found behavior
+
+This means the repo now has a measurable RAG baseline for both:
+- persistent library documents
+- temporary scoped uploads
 
 ## Project Structure
 

@@ -68,6 +68,24 @@ Each line should be one JSON object like this:
 - `should_answer_from_docs`
 - `expected_answer_points`
 
+## Optional Scope Fields
+
+- `scope_source_type`
+
+Use `scope_source_type` when the same filename may exist in more than one registry scope.
+
+Example:
+
+```json
+{
+  "document_source": "policy_bundle.pdf",
+  "scope_source_type": "upload"
+}
+```
+
+This is especially useful for upload-scoped benchmarks, where the runner should prefer
+the uploaded document instead of a library copy with the same filename.
+
 ## Suggested Categories
 
 - `exact_lookup`
@@ -76,6 +94,25 @@ Each line should be one JSON object like this:
 - `section_understanding`
 - `not_found`
 - `bilingual`
+
+## Upload-Scoped Benchmarks
+
+The file `benchmark_upload_scoped_v1.jsonl` is for temporary upload-chat behavior rather than
+the persistent library corpus.
+
+Before running it:
+
+1. start the backend
+2. upload the target file once through `/ui` or `/chat-with-file`
+3. confirm the uploaded filename exists in the document registry
+4. run the benchmark
+
+Example:
+
+```bash
+python scripts/validate_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl
+python scripts/run_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl --mode both
+```
 
 ## Category Guidance
 
@@ -139,3 +176,28 @@ When the benchmark is mature enough, selected items can be extended with:
 - citation style
 
 That becomes the supervised QLoRA dataset.
+
+## QLoRA Starter File
+
+The file `qlora_train_v1.jsonl` is the first supervised training scaffold.
+
+It uses this shape:
+
+```json
+{
+  "id": "qlora-001",
+  "source_benchmark_id": "tilon-rise-001",
+  "language": "ko",
+  "question": "사용자 질문",
+  "context": "[Doc: ... | Page: ... | Section: ... | Lang: ko]\n근거 문맥",
+  "answer": "근거 기반 최종 답변"
+}
+```
+
+Recommended rules when expanding it:
+
+- keep `context` close to the live retrieval format
+- keep `answer` grounded and concise
+- include clarification answers for ambiguous upload cases
+- include refusal answers for true `not_found` cases
+- preserve benchmark linkage through `source_benchmark_id`

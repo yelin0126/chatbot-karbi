@@ -308,6 +308,61 @@ Related docs:
 - CPU-first reranking is supported for stability
 - reranker load failure is cached instead of retried endlessly
 
+### 28. Repeated Uploads Now Replace Scoped Chunks
+**Area:** `app/core/vectorstore.py`, `app/pipeline/ingest.py`
+
+**Original problem**
+- re-uploading the same upload-scoped file could accumulate duplicate chunks for the same `doc_id`
+- this polluted whole-document scoped prompts and produced unstable answers
+
+**What changed**
+- chunk IDs are now deterministic for stored chunks
+- upload re-ingestion deletes old chunks for the same `doc_id` before adding new ones
+- whole-document fetches dedupe repeated chunk signatures
+
+### 29. Bundled Upload PDFs Now Handle Ambiguity Better
+**Area:** `app/chat/handlers.py`
+
+**Original problem**
+- some uploaded PDFs bundle multiple internal guidelines in one file
+- generic questions like `지원대상이 어떻게 돼?` or `제3조 알려줘` were ambiguous
+- even named questions like `프로젝트Lab 제4조` could accidentally answer from another sub-guideline with the same article number
+
+**What changed**
+- ambiguous bundled-PDF questions now ask for clarification
+- if the user names a specific sub-guideline such as `프로젝트Lab`, `대학원 인턴십`, or `캡스톤디자인`, full-document context is narrowed to that scope only
+- continuation pages inherit the active sub-guideline label
+
+### 30. Upload-Scoped Benchmark Was Added
+**Area:** `finetuning/data/benchmark_upload_scoped_v1.jsonl`, `scripts/run_benchmark.py`
+
+**Original problem**
+- the main benchmark covered library docs well, but upload-scoped QA had no repeatable regression test
+- bundled upload behavior was being tested manually only
+
+**What changed**
+- added `benchmark_upload_scoped_v1.jsonl`
+- benchmark runner now supports optional `scope_source_type`
+- upload-scoped evaluation now covers:
+  - ambiguity clarification
+  - named sub-guideline narrowing
+  - upload-specific not-found behavior
+
+### 31. QLoRA Starter Dataset Was Added
+**Area:** `finetuning/data/qlora_train_v1.jsonl`, `finetuning/README.md`, `finetuning/data/README.md`
+
+**Original problem**
+- the repo had benchmark data but no first supervised dataset scaffold for answer tuning
+
+**What changed**
+- added a small benchmark-linked supervised dataset scaffold
+- includes:
+  - grounded lookup answers
+  - bilingual grounded answers
+  - upload ambiguity clarification answers
+  - clean refusal answers
+- documentation now explains how benchmark rows feed QLoRA data creation
+
 ---
 
 ## Current Strengths
@@ -318,12 +373,13 @@ The project is now strongest in:
 - upload/document flow
 - hybrid retrieval foundation
 - document-aware scoped chat
+- benchmarked library-doc QA
+- benchmarked upload-scoped QA
 
 ## Current Gaps
 
 The project is still weakest in:
-- retrieval benchmark/evaluation
-- formal QLoRA pipeline
+- full QLoRA training/evaluation scripts
 - multi-document comparison
 - richer block-level structured artifacts
 - tuned production thresholds for real Tilon docs
@@ -343,9 +399,12 @@ The project is still weakest in:
 | Reranking | Added | Still being tuned for runtime behavior |
 | Confidence gating | Added | Needs benchmark tuning |
 | Document registry | Started | `doc_id` exists, lifecycle not complete |
+| Library benchmark | Done | Stable baseline exists |
+| Upload benchmark | Done | Scoped upload regressions are now measurable |
+| QLoRA starter dataset | Started | First supervised scaffold exists |
 | UI polish | Partial | Functional, not product-polished |
-| Evaluation benchmark | Missing | Major next milestone |
-| QLoRA training | Missing | Depends on stable evaluation loop |
+| Evaluation expansion | In progress | Broader coverage still needed |
+| QLoRA training script | Missing | Next major implementation step |
 
 ---
 
@@ -354,15 +413,15 @@ The project is still weakest in:
 The project is no longer blocked by basic architecture.
 
 The main risk now is not lack of features, but lack of:
-- benchmark data
-- evaluation discipline
-- a formal QLoRA training/evaluation loop
+- broader benchmark coverage
+- automated QLoRA training/evaluation scripts
+- disciplined model-to-model comparison after fine-tuning
 
 That is why the repo can feel “stuck” even though it has improved significantly.
 
 The next milestone is:
 
-1. stabilize retrieval on real Tilon documents
-2. create benchmark questions
-3. record baseline metrics
-4. then begin QLoRA properly
+1. keep expanding benchmark coverage on real Tilon documents and uploads
+2. grow the supervised QLoRA dataset from the benchmark rows
+3. add the actual QLoRA training/evaluation scripts
+4. then compare base RAG vs RAG + QLoRA

@@ -12,6 +12,7 @@ System context:
 - `evaluate.py` — Model evaluation
 - `data/benchmark_template.jsonl` — Retrieval + answer benchmark seed
 - `data/README.md` — Benchmark schema and workflow
+- `data/qlora_train_v1.jsonl` — First supervised training scaffold linked to benchmark rows
 - `output/` — Trained LoRA adapters
 
 ## Recommended Order
@@ -35,6 +36,9 @@ Each sample must match the prompt format from `app/chat/prompts.py`:
 
 ```json
 {
+  "id": "qlora-001",
+  "source_benchmark_id": "tilon-rise-001",
+  "language": "ko",
   "question": "User's question",
   "context": "[Doc: filename.pdf | Page: 3 | Section: Requirements | Lang: ko]\nActual chunk text here...",
   "answer": "Expected high-quality answer with source citation."
@@ -42,6 +46,16 @@ Each sample must match the prompt format from `app/chat/prompts.py`:
 ```
 
 ## Critical: The context format MUST match `app/retrieval/retriever.py:format_context()`
+
+The starter file `data/qlora_train_v1.jsonl` is a manual scaffold, not a final large training set.
+Its purpose is to:
+
+1. anchor the answer style you want after RAG is stable
+2. preserve difficult benchmark cases such as:
+   - bilingual grounded answers
+   - bundled upload clarification
+   - clean not-found refusals
+3. make later data expansion consistent across teammates
 
 ## Validation
 
@@ -75,3 +89,14 @@ Outputs are written to:
 
 - `finetuning/results/benchmark_results_*.jsonl`
 - `finetuning/results/benchmark_summary_*.json`
+
+## Suggested Next Step For QLoRA
+
+After the benchmark baseline is frozen:
+
+1. expand `data/qlora_train_v1.jsonl` from the strongest benchmark rows
+2. keep contexts close to the live retrieved format
+3. prefer high-signal grounded answers over long stylistic responses
+4. include both:
+   - positive grounded answers
+   - clarification / refusal answers

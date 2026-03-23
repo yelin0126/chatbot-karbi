@@ -86,8 +86,12 @@ def _needs_full_document_context(text: str) -> bool:
         "structure", "outline", "overview", "summarize", "summary",
         "analyze", "analysis", "key points", "main points", "extract key",
         "extract data", "important information", "important info",
+        "부칙", "경과조치", "지원대상", "운영절차", "시행일", "준용", "위원장",
+        "article", "clause", "section title",
     ]
-    return any(keyword in lower for keyword in indicators)
+    if any(keyword in lower for keyword in indicators):
+        return True
+    return bool(re.search(r"제\s*\d+\s*조", text))
 
 
 def _is_smalltalk_query(text: str) -> bool:
@@ -163,11 +167,125 @@ def _is_direct_extraction_query(text: str) -> bool:
     lower = text.lower().strip()
     indicators = [
         "텍스트 추출", "문자 추출", "글자 추출", "읽어줘", "텍스트만", "원문", "ocr",
+        "내용 추출", "내용 보여", "전문 보여", "본문 보여", "여기 안에 있는 내용 추출",
         "what does this image say", "what does the image say",
         "give me the text", "extract the text", "read the text",
         "read this image", "text in the image", "transcribe",
     ]
     return any(keyword in lower for keyword in indicators)
+
+
+def _normalize_scope_text(text: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", (text or "").lower())
+
+
+def _extract_scope_labels(docs) -> List[str]:
+    """Extract distinct sub-guideline labels from a combined uploaded document."""
+    labels = []
+    seen = set()
+    for doc in docs:
+        raw_title = str(doc.metadata.get("section_title") or "").strip()
+        if not raw_title:
+            continue
+
+        cleaned = raw_title
+        cleaned = re.sub(r"^제주대학교\s*RISE사업단\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*운영\s*지침.*$", "", cleaned)
+        cleaned = re.sub(r"\s*규정.*$", "", cleaned)
+        cleaned = cleaned.strip(" -:")
+        if not cleaned:
+            continue
+
+        key = _normalize_scope_text(cleaned)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(cleaned)
+    return labels
+
+
+def _chunk_scope_label(doc, active_label: Optional[str]) -> Optional[str]:
+    """Infer which bundled sub-guideline a chunk belongs to."""
+    raw_title = str(doc.metadata.get("section_title") or "").strip()
+    if raw_title:
+        labels = _extract_scope_labels([doc])
+        if labels:
+            return labels[0]
+    return active_label
+
+
+def _filter_docs_to_named_scope(user_message: str, docs):
+    """
+    If the user explicitly names one bundled sub-guideline, keep only those chunks.
+
+    Continuation pages without their own section title inherit the previous label.
+    """
+    labels = _extract_scope_labels(docs)
+    if len(labels) < 2:
+        return docs
+
+    normalized_query = _normalize_scope_text(user_message)
+    matched_label = None
+    for label in labels:
+        token = _normalize_scope_text(label)
+        if token and token in normalized_query:
+            matched_label = label
+            break
+
+    if not matched_label:
+        return docs
+
+    filtered = []
+    current_label = None
+    for doc in docs:
+        current_label = _chunk_scope_label(doc, current_label)
+        if current_label == matched_label:
+            filtered.append(doc)
+
+    return filtered or docs
+
+
+def _build_scoped_ambiguity_answer(user_message: str, labels: List[str]) -> str:
+    examples = ", ".join(f"'{label}'" for label in labels[:3])
+    if re.search(r"[가-힣]", user_message):
+        return (
+            "이 업로드 파일에는 여러 운영지침이 함께 들어 있어 질문이 모호합니다. "
+            f"현재 확인되는 지침은 {examples} 입니다. "
+            "어느 지침을 기준으로 답변할지 함께 지정해 주세요. "
+            "예: '프로젝트Lab 지원대상 알려줘', '대학원 인턴십 제4조 알려줘'"
+        )
+    return (
+        "This uploaded file contains multiple sub-guidelines, so the question is ambiguous. "
+        f"I found these guideline scopes: {examples}. "
+        "Please name which one you mean, for example: "
+        "'Tell me the support target for ProjectLab' or 'Explain Article 4 of the Graduate Internship guideline.'"
+    )
+
+
+def _should_request_scope_clarification(user_message: str, docs) -> Optional[str]:
+    """
+    Ask for clarification when a single uploaded PDF bundles multiple sub-guidelines
+    that reuse overlapping article numbers or headings.
+    """
+    labels = _extract_scope_labels(docs)
+    if len(labels) < 2:
+        return None
+
+    normalized_query = _normalize_scope_text(user_message)
+    label_tokens = [_normalize_scope_text(label) for label in labels]
+    if any(token and token in normalized_query for token in label_tokens):
+        return None
+
+    ambiguous_article = bool(re.search(r"제\s*\d+\s*조", user_message))
+    ambiguous_heading_terms = [
+        "지원대상", "운영절차", "경과조치", "부칙", "지원사항",
+        "지원중단", "의무위반", "가이드라인 준용", "정의", "목적",
+        "시행일", "조치", "내용 알려줘",
+    ]
+    if ambiguous_article or any(term in user_message for term in ambiguous_heading_terms):
+        return _build_scoped_ambiguity_answer(user_message, labels)
+
+    return None
 
 
 def _needs_section_understanding_style(text: str) -> bool:
@@ -432,6 +550,29 @@ def handle_chat(
             }
 
     if docs:
+        if use_full_document:
+            scoped_docs = _filter_docs_to_named_scope(user_message, docs)
+            if len(scoped_docs) != len(docs):
+                logger.info(
+                    "Narrowed bundled document context from %d to %d chunks based on named sub-guideline",
+                    len(docs),
+                    len(scoped_docs),
+                )
+            docs = scoped_docs
+            clarification = _should_request_scope_clarification(user_message, docs)
+            if clarification:
+                logger.info(
+                    "Ambiguous scoped question across %d sub-guidelines in '%s'; requesting clarification",
+                    len(_extract_scope_labels(docs)),
+                    scoped_source,
+                )
+                return {
+                    "answer": clarification,
+                    "sources": extract_sources(docs),
+                    "mode": "document_qa",
+                    "active_source": active_source,
+                    "active_doc_id": active_doc_id,
+                }
         doc_context = format_context(docs)
         sources = extract_sources(docs)
         if use_full_document:

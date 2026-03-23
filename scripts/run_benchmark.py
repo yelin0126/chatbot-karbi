@@ -65,16 +65,23 @@ def load_benchmark(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _pick_best_registry_entry(entries: list[dict[str, Any]]) -> dict[str, Any]:
+def _pick_best_registry_entry(
+    entries: list[dict[str, Any]],
+    preferred_source_type: str | None = None,
+) -> dict[str, Any]:
     def sort_key(item: dict[str, Any]) -> tuple[int, str]:
-        source_type_score = 0 if item.get("source_type") == "library" else 1
+        source_type = item.get("source_type")
+        if preferred_source_type:
+            source_type_score = 0 if source_type == preferred_source_type else 1
+        else:
+            source_type_score = 0 if source_type == "library" else 1
         updated = str(item.get("updated_at") or item.get("created_at") or "")
         return (source_type_score, updated)
 
     return sorted(entries, key=sort_key)[0]
 
 
-def resolve_scope(document_source: str) -> BenchmarkScope:
+def resolve_scope(document_source: str, preferred_source_type: str | None = None) -> BenchmarkScope:
     entries = [doc for doc in list_documents() if doc.get("source") == document_source]
     if not entries:
         return BenchmarkScope(
@@ -85,10 +92,13 @@ def resolve_scope(document_source: str) -> BenchmarkScope:
             resolution_note="document source not found in registry",
         )
 
-    best = _pick_best_registry_entry(entries)
+    best = _pick_best_registry_entry(entries, preferred_source_type=preferred_source_type)
     note = "matched exact source"
     if len(entries) > 1:
-        note = f"matched {len(entries)} documents; selected preferred scope"
+        if preferred_source_type:
+            note = f"matched {len(entries)} documents; preferred source_type='{preferred_source_type}'"
+        else:
+            note = f"matched {len(entries)} documents; selected preferred scope"
 
     return BenchmarkScope(
         source=best.get("source"),
@@ -202,6 +212,8 @@ def detect_refusal(answer: str) -> bool:
         "문서에서 확인할 수 없습니다",
         "문서에 나와 있지 않습니다",
         "문서에 언급되어 있지 않습니다",
+        "문서에 명시되어 있지 않습니다",
+        "명시되어 있지 않습니다",
         "확인되지 않습니다",
         "확인할 수 없습니다",
         "찾을 수 없습니다",
@@ -316,7 +328,10 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     with result_path.open("w", encoding="utf-8") as handle:
         for item in rows:
-            scope = resolve_scope(item["document_source"])
+            scope = resolve_scope(
+                item["document_source"],
+                preferred_source_type=item.get("scope_source_type"),
+            )
             row_result: dict[str, Any] = {
                 "id": item["id"],
                 "category": item["category"],

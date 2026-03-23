@@ -9,7 +9,7 @@ This architecture should be understood as two connected systems:
 1. a document RAG inference pipeline
 2. a QLoRA fine-tuning pipeline for the final answer model
 
-The current repo is much stronger on the RAG side than the QLoRA side. The next project milestone is not another large parser rewrite; it is to stabilize RAG enough that evaluation and fine-tuning can begin systematically.
+The current repo is much stronger on the RAG side than the QLoRA side. RAG is now stable enough to support benchmark-driven tuning, and the next milestone is to expand the supervised QLoRA dataset and training workflow rather than redesigning the parser again.
 
 The product supports two document sources:
 
@@ -43,6 +43,8 @@ The system is optimized for:
 3. It is parsed, chunked, enriched, and stored
 4. Chat keeps an `active_source` so follow-up questions stay scoped to that uploaded file
 5. Temporary chat uploads are not treated as permanent library docs by the watcher
+6. Re-uploading the same scoped file replaces old chunks for that `doc_id` instead of accumulating duplicates
+7. Bundled upload PDFs with multiple internal guidelines can trigger clarification or be narrowed to the named sub-guideline
 
 ## Bigger-Picture Architecture
 
@@ -120,6 +122,8 @@ Responsibilities:
 - reciprocal rank fusion
 - optional reranking
 - confidence-aware scoped retrieval
+- deterministic chunk IDs for safer scoped re-ingestion
+- doc-scoped deletion/replacement for repeated uploads
 
 ### Chat Layer
 - [app/chat/handlers.py](/home/tilon/chatbot-karbi/app/chat/handlers.py)
@@ -167,6 +171,26 @@ For scoped uploaded-file chat:
 - specific question -> top-k scoped retrieval
 - full-document tasks like summary/analysis -> full-document scoped context
 - direct OCR/transcription requests -> return extracted text directly
+- bundled multi-guideline uploads -> ask for clarification on ambiguous clause questions
+- named sub-guideline questions -> narrow context to the relevant sub-guideline pages only
+
+## Evaluation Assets
+
+The repo now has two benchmark tracks:
+
+1. library benchmark
+   - `finetuning/data/benchmark_tilon_v1.jsonl`
+   - measures persistent library-doc QA, summary, bilingual behavior, and not-found handling
+
+2. upload-scoped benchmark
+   - `finetuning/data/benchmark_upload_scoped_v1.jsonl`
+   - measures upload-specific ambiguity handling, named sub-guideline narrowing, and refusal behavior
+
+The first supervised QLoRA scaffold also exists:
+
+- `finetuning/data/qlora_train_v1.jsonl`
+  - benchmark-linked starter examples
+  - includes grounded answers, clarification answers, and refusal answers
 
 ## Maturity By Layer
 
@@ -183,10 +207,10 @@ For scoped uploaded-file chat:
 - confidence thresholds
 - screenshot/image upload behavior in broader chat
 - document registry behavior
+- upload benchmark breadth beyond the first bundled-PDF case
 
 ### Not started or not complete
-- benchmark-driven evaluation
-- formal QLoRA dataset pipeline
+- full QLoRA training script / adapter workflow
 - multi-document comparison
 - richer block-level artifacts for tables/citations/versioning
 
@@ -221,11 +245,11 @@ The repo has moved beyond the early prototype stage, but progress can still feel
 
 That is useful engineering work, but it does not yet create a measurable product-quality loop.
 
-What is missing is:
-- a benchmark set of real Tilon documents
-- a representative query set
-- baseline metrics
-- a QLoRA training/evaluation workflow
+What is still missing is:
+- a larger benchmark set covering more uploaded-file patterns
+- a broader representative query set
+- automated QLoRA training/evaluation scripts
+- model-to-model comparison after fine-tuning
 
 Without these, it is hard to tell whether the project is improving globally or only locally.
 
@@ -236,19 +260,19 @@ Without these, it is hard to tell whether the project is improving globally or o
 2. Finalize document registry behavior and upload lifecycle
 3. Keep prompt/context format stable enough for training reuse
 
-### Phase 2: Build Evaluation Benchmark
-1. Collect representative Tilon manuals, guides, and internal docs
-2. Build question sets for:
+### Phase 2: Expand Evaluation Coverage
+1. Add more representative Tilon manuals, guides, and internal docs
+2. Expand both library and upload-scoped question sets for:
    - exact lookup
    - summary
    - OCR/image text
    - section understanding
    - negative “not found” cases
    - Korean/English mixed queries
-3. Record baseline system behavior
+3. Keep recording baseline system behavior as changes land
 
 ### Phase 3: Start QLoRA Properly
-1. Build training data using the same live prompt/context format
+1. Expand the supervised dataset using the same live prompt/context format
 2. Fine-tune the answer model, not the retriever
 3. Compare:
    - base model
