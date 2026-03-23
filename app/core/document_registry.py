@@ -163,3 +163,44 @@ def clear_document_registry() -> None:
     with _registry_lock:
         _save_registry({"documents": []})
     logger.info("Document registry cleared.")
+
+
+def remove_documents(
+    source: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> int:
+    """Remove registry entries matching the provided scope."""
+    with _registry_lock:
+        registry = _load_registry()
+        documents = registry.get("documents", [])
+        kept = []
+        removed = 0
+
+        for document in documents:
+            matches = True
+            if source and document.get("source") != source:
+                matches = False
+            if doc_id and document.get("doc_id") != doc_id:
+                matches = False
+            if source_type and document.get("source_type") != source_type:
+                matches = False
+
+            if matches:
+                removed += 1
+            else:
+                kept.append(document)
+
+        if removed:
+            registry["documents"] = kept
+            _save_registry(registry)
+
+    if removed:
+        logger.info(
+            "Removed %d document registry entries%s%s%s.",
+            removed,
+            f" source='{source}'" if source else "",
+            f" doc_id='{doc_id}'" if doc_id else "",
+            f" source_type='{source_type}'" if source_type else "",
+        )
+    return removed

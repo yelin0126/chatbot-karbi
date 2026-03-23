@@ -10,7 +10,7 @@ IMPROVEMENTS over original:
 
 import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
@@ -31,12 +31,13 @@ from app.models.schemas import (
     SourceInfo,
 )
 from app.core.llm import check_ollama_health
-from app.core.document_registry import clear_document_registry
+from app.core.document_registry import clear_document_registry, list_documents, remove_documents
 from app.core.watcher import suppress_watcher_for
 from app.core.vectorstore import (
     get_vectorstore,
     get_collection_stats,
     get_all_metadata,
+    delete_documents,
     reset as reset_vectorstore,
 )
 from app.chat.handlers import handle_chat
@@ -110,6 +111,8 @@ def chat(req: ChatRequest):
             model=req.model or OLLAMA_MODEL,
             active_source=req.active_source,
             active_doc_id=req.active_doc_id,
+            active_sources=req.active_sources,
+            active_doc_ids=req.active_doc_ids,
             system_prompt=req.system_prompt,
         )
 
@@ -120,6 +123,8 @@ def chat(req: ChatRequest):
             mode=result.get("mode", "general"),
             active_source=result.get("active_source", req.active_source),
             active_doc_id=result.get("active_doc_id", req.active_doc_id),
+            active_sources=result.get("active_sources", req.active_sources),
+            active_doc_ids=result.get("active_doc_ids", req.active_doc_ids),
             done=True,
         )
 
@@ -200,6 +205,8 @@ async def chat_with_file(
         "mode": result.get("mode", "document_qa"),
         "active_source": file.filename,
         "active_doc_id": ingest_result.get("doc_id"),
+        "active_sources": [file.filename],
+        "active_doc_ids": [ingest_result.get("doc_id")] if ingest_result.get("doc_id") else [],
         "ingest": ingest_result,
         "done": True,
     }
@@ -365,6 +372,82 @@ def docs_list():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"docs-list failed: {e}")
+
+
+@router.get("/uploaded-docs")
+def uploaded_docs():
+    """Return remembered chat-upload documents from the document registry."""
+    try:
+        uploads = [
+            {
+                "doc_id": doc.get("doc_id"),
+                "source": doc.get("source"),
+                "source_type": doc.get("source_type"),
+                "source_path": doc.get("source_path"),
+                "page_total": doc.get("page_total"),
+                "chunk_count": doc.get("chunk_count"),
+                "languages": doc.get("languages", []),
+                "updated_at": doc.get("updated_at"),
+                "uploaded_at": doc.get("uploaded_at"),
+            }
+            for doc in list_documents()
+            if doc.get("source_type") == "upload"
+        ]
+        uploads.sort(
+            key=lambda doc: doc.get("updated_at") or doc.get("uploaded_at") or "",
+            reverse=True,
+        )
+        return {
+            "count": len(uploads),
+            "documents": uploads,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"uploaded-docs failed: {e}")
+
+
+@router.delete("/upload-document")
+def delete_upload_document(
+    source: Optional[str] = None,
+    doc_id: Optional[str] = None,
+):
+    """Delete one remembered upload from vectorstore, registry, and local uploads."""
+    if not source and not doc_id:
+        raise HTTPException(status_code=400, detail="source 또는 doc_id 중 하나는 필요합니다.")
+
+    try:
+        deleted_chunks = delete_documents(
+            source=source,
+            doc_id=doc_id,
+            source_type="upload",
+        )
+        removed_registry = remove_documents(
+            source=source,
+            doc_id=doc_id,
+            source_type="upload",
+        )
+
+        file_deleted = False
+        if source:
+            upload_path = UPLOADS_DIR / Path(source).name
+            if upload_path.exists() and upload_path.is_file():
+                upload_path.unlink()
+                file_deleted = True
+
+        if deleted_chunks == 0 and removed_registry == 0 and not file_deleted:
+            raise HTTPException(status_code=404, detail="삭제할 업로드 문서를 찾지 못했습니다.")
+
+        return {
+            "message": "업로드 파일이 삭제되었습니다.",
+            "deleted_chunks": deleted_chunks,
+            "removed_registry": removed_registry,
+            "file_deleted": file_deleted,
+            "source": source,
+            "doc_id": doc_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"upload-document delete failed: {e}")
 
 
 # ── Keyword Count ──────────────────────────────────────────────────────

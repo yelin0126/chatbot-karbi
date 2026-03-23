@@ -253,6 +253,43 @@ def get_documents_by_doc_id(doc_id: str) -> List[Document]:
     return get_documents_by_source(doc_id=doc_id)
 
 
+def get_documents_by_doc_ids(doc_ids: List[str]) -> List[Document]:
+    """Return all chunks for multiple registered documents in source/page order."""
+    combined: List[Document] = []
+    seen = set()
+    for doc_id in doc_ids:
+        for doc in get_documents_by_doc_id(doc_id):
+            meta = doc.metadata or {}
+            signature = (
+                meta.get("doc_id"),
+                meta.get("page"),
+                meta.get("chunk_index"),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            combined.append(doc)
+
+    def _sort_value(value: Any) -> Any:
+        if value is None:
+            return float("inf")
+        if isinstance(value, (int, float)):
+            return value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+    combined.sort(
+        key=lambda doc: (
+            str(doc.metadata.get("source") or ""),
+            _sort_value(doc.metadata.get("page")),
+            _sort_value(doc.metadata.get("chunk_index")),
+        )
+    )
+    return combined
+
+
 def get_document_chunk_count(
     source: Optional[str] = None,
     doc_id: Optional[str] = None,

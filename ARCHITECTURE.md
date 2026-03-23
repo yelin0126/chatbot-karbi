@@ -41,10 +41,13 @@ The system is optimized for:
 1. User uploads a file in `/ui` or `/chat-with-file`
 2. File is saved to `data/uploads/`
 3. It is parsed, chunked, enriched, and stored
-4. Chat keeps an `active_source` so follow-up questions stay scoped to that uploaded file
-5. Temporary chat uploads are not treated as permanent library docs by the watcher
-6. Re-uploading the same scoped file replaces old chunks for that `doc_id` instead of accumulating duplicates
-7. Bundled upload PDFs with multiple internal guidelines can trigger clarification or be narrowed to the named sub-guideline
+4. The upload is written into the document registry as a remembered chat document
+5. The `/ui` sidebar lists remembered uploads so users can re-select them later
+6. Remembered uploads can be multi-selected for comparison-style chat
+7. Chat keeps an `active_source` or multi-document selection so follow-up questions stay scoped
+8. Temporary chat uploads are not treated as permanent library docs by the watcher
+9. Re-uploading the same scoped file replaces old chunks for that `doc_id` instead of accumulating duplicates
+10. Bundled upload PDFs with multiple internal guidelines can trigger clarification or be narrowed to the named sub-guideline
 
 ## Bigger-Picture Architecture
 
@@ -220,6 +223,10 @@ The built-in `/ui` is the primary frontend.
 
 Behavior:
 - uploaded file is stored in `data/uploads/`
+- one or many files can be uploaded from the built-in UI
+- remembered uploaded documents appear in the left sidebar
+- clicking a remembered upload re-scopes the current chat to that document
+- selecting multiple remembered uploads enables comparison-style document chat
 - the chat remembers `active_source`
 - follow-up messages stay scoped to the uploaded file
 - user can clear scope and return to global retrieval
@@ -232,7 +239,6 @@ Still not fully implemented:
 - multi-document comparison workflow
 - richer block-level artifact storage beyond page metadata
 - polished production UI design
-- formal evaluation benchmark
 - QLoRA training/evaluation pipeline
 
 ## Why The Project Can Feel “Stuck”
@@ -278,6 +284,81 @@ Without these, it is hard to tell whether the project is improving globally or o
    - base model
    - RAG + base
    - RAG + QLoRA
+
+## Evaluation Adoption Plan
+
+To translate the broader evaluation strategy into this specific repo, use a phased adoption model.
+
+### Adopt Now
+
+These fit the current codebase immediately and should become the default workflow:
+
+1. Keep the repo's local benchmark runner as the primary evaluation backbone
+   - `scripts/run_benchmark.py`
+   - `finetuning/data/benchmark_tilon_v1.jsonl`
+   - `finetuning/data/benchmark_upload_scoped_v1.jsonl`
+2. Continue expanding benchmark coverage with real Tilon documents and real upload-scoped cases
+3. Add deterministic retrieval metrics
+   - `Recall@k`
+   - `MRR`
+   - `NDCG@k`
+   - ablations for vector-only / keyword-only / hybrid / hybrid + reranker
+4. Expand the supervised QLoRA dataset from benchmark-linked examples
+   - `finetuning/data/qlora_train_v1.jsonl`
+
+### Adopt Next
+
+These are strong next steps after the current benchmark/data scaffolds are larger and stable:
+
+1. Add deterministic faithfulness and citation checks
+   - NLI-based entailment scoring
+   - character-level overlap / Korean-friendly answer checks
+2. Add a calibrated local LLM-as-judge layer
+   - DeepEval with local Ollama-backed `qwen2.5:7b`
+   - only after comparing its judgments against a small human-checked set
+3. Expand evaluation categories for:
+   - OCR/image-heavy docs
+   - tables/numerical reasoning
+   - more bilingual/code-switched cases
+   - multi-hop section reasoning
+
+### Adopt Later
+
+These are valuable, but should wait until the benchmark + training loop is already routine:
+
+1. Arize Phoenix for richer embedding/retrieval observability
+2. Langfuse for production tracing and human review queues
+3. MLflow for experiment tracking across RAG and QLoRA variants
+4. automated production sampling / drift alerts / feedback flywheel infrastructure
+
+## Model Choice And Fine-Tuning
+
+Changing the inference LLM can affect fine-tuning significantly.
+
+### What transfers
+
+- benchmark datasets
+- retrieval metrics
+- most benchmark question sets
+- most supervised training examples
+
+### What does not transfer cleanly
+
+- LoRA/QLoRA adapters themselves
+- model-specific prompt behavior
+- optimal training hyperparameters
+- exact evaluation baselines for answer quality
+
+In practice:
+
+- if you change from `qwen2.5:7b` to a different base family such as Llama or Mistral, you should assume the fine-tuning artifacts are not reusable
+- if you stay within the same target base model family, the datasets still transfer well, but the trained adapter is still tied to that specific base model
+
+Recommended rule:
+
+- freeze the target base answer model before starting serious QLoRA training
+- keep benchmark datasets model-agnostic
+- treat model swaps as new baseline comparisons, not as a small runtime tweak
 
 ## QLoRA Start Conditions
 

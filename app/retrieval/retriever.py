@@ -16,6 +16,7 @@ from langchain_core.documents import Document
 from app.config import (
     VECTOR_TOP_K,
     RERANKER_ENABLED,
+    LIVE_RERANKER_ENABLED,
     GLOBAL_MIN_RELEVANCE_SCORE,
     STRONG_KEYWORD_CONFIDENCE_FLOOR,
 )
@@ -44,6 +45,7 @@ def retrieve(
     source_filter: str = None,
     doc_id_filter: str = None,
     full_document: bool = False,
+    enable_rerank: bool | None = None,
 ) -> RetrievalResult:
     """
     Retrieve relevant documents for a query.
@@ -67,7 +69,11 @@ def retrieve(
             used_full_document=True,
         )
 
-    fetch_k = VECTOR_TOP_K * 2 if RERANKER_ENABLED else VECTOR_TOP_K
+    rerank_enabled = RERANKER_ENABLED and (
+        LIVE_RERANKER_ENABLED if enable_rerank is None else enable_rerank
+    )
+
+    fetch_k = VECTOR_TOP_K * 2 if rerank_enabled else VECTOR_TOP_K
 
     # Only apply score filtering when NOT scoped to a specific file
     min_score = None if (source_filter or doc_id_filter) else GLOBAL_MIN_RELEVANCE_SCORE
@@ -104,9 +110,14 @@ def retrieve(
         scope,
     )
 
-    if RERANKER_ENABLED and len(docs) > 1:
+    if rerank_enabled and len(docs) > 1:
         docs = rerank(query, docs)
         logger.info("After reranking: %d documents", len(docs))
+    elif docs and RERANKER_ENABLED and not rerank_enabled:
+        logger.info(
+            "Skipping reranker for %d retrieved document(s) because live reranking is disabled",
+            len(docs),
+        )
     elif docs:
         logger.info("Skipping reranker for %d retrieved document(s)", len(docs))
 

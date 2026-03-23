@@ -71,6 +71,7 @@ Each line should be one JSON object like this:
 ## Optional Scope Fields
 
 - `scope_source_type`
+- `document_sources`
 
 Use `scope_source_type` when the same filename may exist in more than one registry scope.
 
@@ -85,6 +86,20 @@ Example:
 
 This is especially useful for upload-scoped benchmarks, where the runner should prefer
 the uploaded document instead of a library copy with the same filename.
+
+Use `document_sources` for multi-document comparison benchmarks.
+
+Example:
+
+```json
+{
+  "document_source": "doc_a.pdf",
+  "document_sources": ["doc_a.pdf", "doc_b.pdf"]
+}
+```
+
+When `document_sources` contains two or more entries, the benchmark runner scopes the
+question to all selected documents and evaluates comparison-style answers.
 
 ## Suggested Categories
 
@@ -112,6 +127,17 @@ Example:
 ```bash
 python scripts/validate_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl
 python scripts/run_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl --mode both
+```
+
+## Comparison Benchmarks
+
+The file `benchmark_compare_v1.jsonl` is for multi-document PDF comparison.
+
+It uses library documents by default, so it can usually be run immediately after normal ingest:
+
+```bash
+python scripts/validate_benchmark.py --path finetuning/data/benchmark_compare_v1.jsonl
+python scripts/run_benchmark.py --path finetuning/data/benchmark_compare_v1.jsonl --mode both
 ```
 
 ## Category Guidance
@@ -201,3 +227,20 @@ Recommended rules when expanding it:
 - include clarification answers for ambiguous upload cases
 - include refusal answers for true `not_found` cases
 - preserve benchmark linkage through `source_benchmark_id`
+
+## From Dataset To Training
+
+Once the dataset is large enough, use:
+
+```bash
+python finetuning/train.py \
+  --data finetuning/data/qlora_train_v1.jsonl \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --output finetuning/output/qwen25-qlora-v1
+```
+
+Current expectation:
+
+- `qlora_train_v1.jsonl` is a starter set
+- it is useful for testing the training workflow
+- it is not yet large enough for a strong final adapter

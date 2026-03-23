@@ -171,6 +171,45 @@ Related docs:
 - uploaded docs are ingested immediately
 - chat keeps the uploaded document scoped for follow-up questions
 
+### 15A. UI Now Remembers Uploaded Files
+**Area:** `app/api/routes.py`, `app/api/upload_ui.py`, document registry
+
+**Original problem**
+- uploaded files behaved like one-off actions in the UI
+- users could not easily see what had already been uploaded
+- there was no simple sidebar flow to re-scope a chat back to an earlier upload
+
+**What changed**
+- the built-in UI can now upload multiple files in one action
+- remembered uploads are loaded from the document registry
+- a sidebar section lists uploaded files with basic metadata
+- clicking a remembered upload re-scopes the current chat to that document
+
+### 15B. Live Reranking Became a Runtime Policy
+**Area:** `app/config.py`, `app/retrieval/retriever.py`
+
+**Original problem**
+- reranking improved some benchmark scores
+- but live latency cost was too high for normal chat use
+
+**What changed**
+- live retrieval now respects a separate `LIVE_RERANKER_ENABLED` flag
+- default chat can stay on lower-latency hybrid retrieval
+- reranking remains available for benchmark and ablation comparisons
+
+### 15C. Multi-Document Comparison Scope Was Added
+**Area:** `app/models/schemas.py`, `app/chat/handlers.py`, `app/api/routes.py`, `app/api/upload_ui.py`
+
+**Original problem**
+- chat could only keep one active uploaded document at a time
+- comparison across remembered uploads was not a real backend feature
+
+**What changed**
+- chat requests/responses now support multi-document scope fields
+- the upload sidebar can toggle multiple remembered uploads
+- when more than one document is selected, chat builds a comparison-oriented document context
+- comparison responses stay grounded in the selected documents instead of relying on freeform general chat
+
 ### 16. Direct OCR/Text Extraction Flow Was Added
 **Area:** `app/chat/handlers.py`
 

@@ -4,11 +4,13 @@ Access at: http://localhost:8000/ui
 """
 
 import logging
+from pathlib import Path
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 logger = logging.getLogger("tilon.ui")
 router = APIRouter(tags=["Chat UI"])
+UI_INDEX_PATH = Path(__file__).resolve().parents[2] / "static" / "index.html"
 
 CHAT_UI_HTML = """
 <!DOCTYPE html>
@@ -22,7 +24,7 @@ CHAT_UI_HTML = """
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e4e4e7;height:100vh;display:flex}
 
         /* ── Sidebar (Chat History) ── */
-        .sidebar{width:260px;background:#18181b;border-right:1px solid #27272a;display:flex;flex-direction:column;flex-shrink:0}
+        .sidebar{width:300px;background:#18181b;border-right:1px solid #27272a;display:flex;flex-direction:column;flex-shrink:0}
         .sidebar-top{padding:12px}
         .new-chat-btn{width:100%;padding:10px;border-radius:8px;border:1px solid #3f3f46;background:transparent;color:#e4e4e7;font-size:.85rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px}
         .new-chat-btn:hover{background:#27272a}
@@ -33,6 +35,17 @@ CHAT_UI_HTML = """
         .history-item .del{display:none;background:none;border:none;color:#71717a;cursor:pointer;font-size:.9rem;padding:0 2px;flex-shrink:0}
         .history-item:hover .del{display:block}
         .history-item .del:hover{color:#f87171}
+        .sidebar-section-title{padding:10px 14px 6px;font-size:.68rem;color:#71717a;text-transform:uppercase;letter-spacing:.08em}
+        .upload-list{max-height:34vh;overflow-y:auto;padding:0 8px 8px}
+        .upload-item{width:100%;padding:10px 12px;border-radius:8px;border:1px solid transparent;background:transparent;color:#d4d4d8;cursor:pointer;text-align:left;margin-bottom:4px}
+        .upload-item:hover{background:#27272a}
+        .upload-item.active-upload{background:#1e1b4b;border-color:#312e81}
+        .upload-name{display:block;font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .upload-meta{display:block;margin-top:4px;font-size:.66rem;color:#94a3b8}
+        .upload-empty{padding:10px 14px 14px;font-size:.74rem;color:#52525b}
+        .sidebar-actions{padding:0 12px 10px;display:flex;gap:6px}
+        .sidebar-btn{flex:1;padding:8px 10px;border-radius:8px;border:1px solid #3f3f46;background:transparent;color:#a1a1aa;font-size:.76rem;cursor:pointer}
+        .sidebar-btn:hover{background:#27272a;color:#fff}
         .sidebar-footer{padding:10px 12px;border-top:1px solid #27272a;font-size:.7rem;color:#3f3f46;text-align:center}
 
         /* ── Main ── */
@@ -129,7 +142,14 @@ CHAT_UI_HTML = """
         <div class="sidebar-top">
             <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
         </div>
+        <div class="sidebar-section-title">Chats</div>
         <div class="history-list" id="historyList"></div>
+        <div class="sidebar-section-title">Uploaded Files</div>
+        <div class="upload-list" id="uploadList"><div class="upload-empty">No uploaded files yet</div></div>
+        <div class="sidebar-actions">
+            <button class="sidebar-btn" onclick="loadUploads()">Refresh Uploads</button>
+            <button class="sidebar-btn" onclick="clearActiveSource()">Clear Selection</button>
+        </div>
         <div class="sidebar-footer">Tilon AI Chatbot v7.4</div>
     </aside>
 
@@ -162,7 +182,7 @@ CHAT_UI_HTML = """
                 <div class="attached-file" id="attachedFile">
                     <span id="afName"></span>
                     <span class="af-size" id="afSize"></span>
-                    <button class="af-remove" onclick="removeFile()">&times;</button>
+                    <button class="af-remove" onclick="clearFiles()">&times;</button>
                 </div>
                 <div class="active-scope" id="activeScope">
                     <span class="scope-label">Scoped to</span>
@@ -176,7 +196,7 @@ CHAT_UI_HTML = """
                     <button class="send-btn" id="sendBtn" onclick="sendMessage()">&#10148;</button>
                 </div>
             </div>
-            <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp">
+            <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple>
         </div>
     </main>
 
@@ -202,8 +222,10 @@ const activeScopeEl=document.getElementById('activeScope');
 const activeScopeName=document.getElementById('activeScopeName');
 const modelSelect=document.getElementById('modelSelect');
 const historyList=document.getElementById('historyList');
+const uploadList=document.getElementById('uploadList');
 
-let pendingFile=null;
+let pendingFiles=[];
+let rememberedUploads=[];
 let currentChatId=null;
 let chats={};  // {id: {title, messages: [{role,content,sources,mode,fileName}]}}
 
@@ -217,6 +239,11 @@ function loadChats(){
         if(!Array.isArray(chats[id].messages))chats[id].messages=[];
         if(typeof chats[id].activeSource!=='string')chats[id].activeSource='';
         if(typeof chats[id].activeDocId!=='string')chats[id].activeDocId='';
+        if(!Array.isArray(chats[id].activeDocs)){
+            chats[id].activeDocs=chats[id].activeSource||chats[id].activeDocId
+                ? [{source:chats[id].activeSource||'',docId:chats[id].activeDocId||''}]
+                : [];
+        }
     }
 }
 function saveChats(){
@@ -225,7 +252,7 @@ function saveChats(){
 
 function newChat(){
     currentChatId='chat_'+Date.now();
-    chats[currentChatId]={title:'New Chat',messages:[],activeSource:'',activeDocId:''};
+    chats[currentChatId]={title:'New Chat',messages:[],activeSource:'',activeDocId:'',activeDocs:[]};
     saveChats();
     messagesEl.innerHTML='';
     renderActiveSource();
@@ -275,38 +302,54 @@ function updateChatTitle(text){
 }
 
 function renderActiveSource(){
-    const activeSource=(currentChatId&&chats[currentChatId])?chats[currentChatId].activeSource:'';
-    if(activeSource){
-        activeScopeName.textContent=activeSource;
+    const activeDocs=(currentChatId&&chats[currentChatId])?chats[currentChatId].activeDocs||[]:[];
+    if(activeDocs.length===1){
+        activeScopeName.textContent=activeDocs[0].source||activeDocs[0].docId||'Selected document';
+        activeScopeEl.classList.add('visible');
+    }else if(activeDocs.length>1){
+        activeScopeName.textContent=`${activeDocs.length} documents selected for comparison`;
         activeScopeEl.classList.add('visible');
     }else{
         activeScopeName.textContent='';
         activeScopeEl.classList.remove('visible');
     }
+    renderUploads();
 }
 
-function setActiveSource(source){
+function setActiveDocuments(docs){
     if(!currentChatId||!chats[currentChatId])return;
-    chats[currentChatId].activeSource=source||'';
-    if(!source)chats[currentChatId].activeDocId='';
+    const normalized=(docs||[]).filter(doc=>doc&&(doc.source||doc.docId)).map(doc=>({
+        source:doc.source||'',
+        docId:doc.docId||''
+    }));
+    chats[currentChatId].activeDocs=normalized;
+    chats[currentChatId].activeSource=normalized.length===1?(normalized[0].source||''):'';
+    chats[currentChatId].activeDocId=normalized.length===1?(normalized[0].docId||''):'';
     saveChats();
     renderActiveSource();
 }
 
 function setActiveDocument(source,docId){
+    setActiveDocuments(source||docId?[{source:source||'',docId:docId||''}]:[]);
+}
+
+function toggleActiveDocument(source,docId){
     if(!currentChatId||!chats[currentChatId])return;
-    chats[currentChatId].activeSource=source||'';
-    chats[currentChatId].activeDocId=docId||'';
-    saveChats();
-    renderActiveSource();
+    const activeDocs=chats[currentChatId].activeDocs||[];
+    const exists=activeDocs.some(doc=>(doc.docId&&doc.docId===docId)||(!doc.docId&&doc.source===source));
+    if(exists){
+        setActiveDocuments(activeDocs.filter(doc=>!((doc.docId&&doc.docId===docId)||(!doc.docId&&doc.source===source))));
+    }else{
+        setActiveDocuments(activeDocs.concat([{source:source||'',docId:docId||''}]));
+    }
 }
 
 function clearActiveSource(){
-    if(!currentChatId||!chats[currentChatId]||!chats[currentChatId].activeSource)return;
-    const cleared=chats[currentChatId].activeSource;
-    setActiveSource('');
-    appendMessageDOM('system','Document scope cleared: '+cleared);
-    pushMessage('system','Document scope cleared: '+cleared);
+    if(!currentChatId||!chats[currentChatId]||!(chats[currentChatId].activeDocs||[]).length)return;
+    const cleared=(chats[currentChatId].activeDocs||[]).map(doc=>doc.source||doc.docId).join(', ');
+    setActiveDocuments([]);
+    appendMessageDOM('system','Document selection cleared: '+cleared);
+    pushMessage('system','Document selection cleared: '+cleared);
 }
 
 function pushMessage(role,content,sources,mode,fileName){
@@ -321,17 +364,39 @@ function pushMessage(role,content,sources,mode,fileName){
 
 fileInput.addEventListener('change',()=>{
     if(fileInput.files.length>0){
-        pendingFile=fileInput.files[0];
-        afName.textContent=pendingFile.name;
-        afSize.textContent=fmtBytes(pendingFile.size);
-        attachedFileEl.classList.add('visible');
-        attachBtn.classList.add('has-file');
+        const seen=new Set(pendingFiles.map(file=>`${file.name}::${file.size}::${file.lastModified}`));
+        for(const file of Array.from(fileInput.files)){
+            const key=`${file.name}::${file.size}::${file.lastModified}`;
+            if(!seen.has(key)){
+                pendingFiles.push(file);
+                seen.add(key);
+            }
+        }
+        renderPendingFiles();
         chatInput.focus();
     }
     fileInput.value='';
 });
 
-function removeFile(){pendingFile=null;attachedFileEl.classList.remove('visible');attachBtn.classList.remove('has-file');}
+function renderPendingFiles(){
+    if(!pendingFiles.length){
+        afName.textContent='';
+        afSize.textContent='';
+        attachedFileEl.classList.remove('visible');
+        attachBtn.classList.remove('has-file');
+        return;
+    }
+    const totalBytes=pendingFiles.reduce((sum,file)=>sum+file.size,0);
+    const names=pendingFiles.slice(0,2).map(file=>file.name);
+    afName.textContent=pendingFiles.length>2
+        ? `${names.join(', ')} +${pendingFiles.length-2} more`
+        : names.join(', ');
+    afSize.textContent=`${pendingFiles.length} file${pendingFiles.length>1?'s':''} • ${fmtBytes(totalBytes)}`;
+    attachedFileEl.classList.add('visible');
+    attachBtn.classList.add('has-file');
+}
+
+function clearFiles(){pendingFiles=[];renderPendingFiles();}
 function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
 
 // ═══════════════════════════════════════════════════════════
@@ -340,25 +405,41 @@ function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed
 
 async function sendMessage(){
     const text=chatInput.value.trim();
-    const file=pendingFile;
-    if(!text&&!file)return;
+    const files=pendingFiles.slice();
+    if(!text&&!files.length)return;
     if(!currentChatId)newChat();
 
-    const displayText=text||(file?'Analyze this document':'');
+    const displayText=text||(files.length===1?'Analyze this document':`Upload ${files.length} documents`);
     const selectedModel=modelSelect.value;
-    const activeSource=chats[currentChatId].activeSource||'';
-    const activeDocId=chats[currentChatId].activeDocId||'';
+    const activeDocs=chats[currentChatId].activeDocs||[];
+    const activeSource=activeDocs.length===1?(activeDocs[0].source||''):'';
+    const activeDocId=activeDocs.length===1?(activeDocs[0].docId||''):'';
+    const activeSources=activeDocs.map(doc=>doc.source).filter(Boolean);
+    const activeDocIds=activeDocs.map(doc=>doc.docId).filter(Boolean);
 
-    appendMessageDOM('user',displayText,null,null,file?file.name:null);
-    pushMessage('user',displayText,null,null,file?file.name:null);
+    appendMessageDOM(
+        'user',
+        displayText,
+        null,
+        null,
+        files.length===1?files[0].name:(files.length>1?`${files.length} files attached`:null)
+    );
+    pushMessage(
+        'user',
+        displayText,
+        null,
+        null,
+        files.length===1?files[0].name:(files.length>1?`${files.length} files attached`:null)
+    );
     updateChatTitle(displayText);
 
     chatInput.value='';chatInput.style.height='auto';
-    removeFile();sendBtn.disabled=true;typingEl.classList.add('active');scrollBottom();
+    clearFiles();sendBtn.disabled=true;typingEl.classList.add('active');scrollBottom();
 
     try{
         let data;
-        if(file){
+        if(files.length===1){
+            const file=files[0];
             const fd=new FormData();
             fd.append('file',file);
             fd.append('message',displayText);
@@ -366,11 +447,35 @@ async function sendMessage(){
             const resp=await fetch('/chat-with-file',{method:'POST',body:fd});
             data=await resp.json();
             if(!resp.ok){showError(data.detail||'Upload failed');return;}
-            setActiveDocument(data.active_source||file.name,data.active_doc_id||'');
+            const responseDocs=(data.active_doc_ids||[]).map((docId,idx)=>({
+                source:(data.active_sources||[])[idx]||data.active_source||file.name,
+                docId:docId||''
+            }));
+            if(responseDocs.length){setActiveDocuments(responseDocs);}
+            else{setActiveDocument(data.active_source||file.name,data.active_doc_id||'');}
             if(data.ingest&&data.ingest.count>0){
                 appendMessageDOM('system',file.name+' — '+data.ingest.count+' chunks ingested');
                 pushMessage('system',file.name+' — '+data.ingest.count+' chunks ingested');
             }
+            await loadUploads();
+            await loadDocs();
+        }else if(files.length>1){
+            const fd=new FormData();
+            for(const file of files)fd.append('files',file);
+            const resp=await fetch('/upload-multiple',{method:'POST',body:fd});
+            data=await resp.json();
+            if(!resp.ok){showError(data.detail||'Multi-upload failed');return;}
+            const successes=(data.results||[]).filter(item=>item.status==='success');
+            const failures=(data.results||[]).filter(item=>item.status!=='success');
+            let summary=`Uploaded ${successes.length} file${successes.length===1?'':'s'} successfully.`;
+            if(failures.length)summary+=` ${failures.length} failed or were skipped.`;
+            if(text)summary+=' Multiple files were uploaded, so no single document was auto-selected. Pick one from the sidebar and ask your question again.';
+            appendMessageDOM('system',summary);
+            pushMessage('system',summary);
+            await loadUploads();
+            await loadDocs();
+            loadHealth();
+            return;
         }else{
             const history=chats[currentChatId].messages.filter(m=>m.role==='user'||m.role==='assistant').slice(-8);
             const resp=await fetch('/chat',{
@@ -380,7 +485,9 @@ async function sendMessage(){
                     history:history,
                     model:selectedModel,
                     active_source:activeSource||null,
-                    active_doc_id:activeDocId||null
+                    active_doc_id:activeDocId||null,
+                    active_sources:activeSources,
+                    active_doc_ids:activeDocIds
                 })
             });
             data=await resp.json();
@@ -388,8 +495,15 @@ async function sendMessage(){
             if(
                 Object.prototype.hasOwnProperty.call(data,'active_source')
                 || Object.prototype.hasOwnProperty.call(data,'active_doc_id')
+                || Object.prototype.hasOwnProperty.call(data,'active_sources')
+                || Object.prototype.hasOwnProperty.call(data,'active_doc_ids')
             ){
-                setActiveDocument(data.active_source||'',data.active_doc_id||'');
+                const responseDocs=(data.active_doc_ids||[]).map((docId,idx)=>({
+                    source:(data.active_sources||[])[idx]||'',
+                    docId:docId||''
+                })).filter(doc=>doc.source||doc.docId);
+                if(responseDocs.length){setActiveDocuments(responseDocs);}
+                else{setActiveDocument(data.active_source||'',data.active_doc_id||'');}
             }
         }
         appendMessageDOM('assistant',data.answer,data.sources,data.mode);
@@ -454,6 +568,61 @@ async function loadModels(){
 modelSelect.addEventListener('change',()=>{localStorage.setItem('tilon_model',modelSelect.value);});
 
 // ═══════════════════════════════════════════════════════════
+// Remembered Uploads
+// ═══════════════════════════════════════════════════════════
+
+function renderUploads(){
+    if(!rememberedUploads.length){
+        uploadList.innerHTML='<div class="upload-empty">No uploaded files yet</div>';
+        return;
+    }
+    const activeDocs=(currentChatId&&chats[currentChatId])?chats[currentChatId].activeDocs||[]:[];
+    uploadList.innerHTML='';
+    for(const doc of rememberedUploads){
+        const button=document.createElement('button');
+        const isSelected=activeDocs.some(active=>active.docId===doc.doc_id||(!active.docId&&active.source===doc.source));
+        button.className='upload-item'+(isSelected?' active-upload':'');
+        button.onclick=()=>selectRememberedUpload(doc);
+        const meta=[
+            doc.page_total?`${doc.page_total}p`:'',
+            doc.chunk_count?`${doc.chunk_count} chunks`:'',
+            Array.isArray(doc.languages)&&doc.languages.length?doc.languages.join('/'):''
+        ].filter(Boolean).join(' • ');
+        button.innerHTML=`<span class="upload-name">${esc(doc.source||'Unnamed upload')}</span><span class="upload-meta">${esc(meta||'upload')}</span>`;
+        uploadList.appendChild(button);
+    }
+}
+
+function selectRememberedUpload(doc){
+    if(!currentChatId)newChat();
+    const wasSelected=(chats[currentChatId].activeDocs||[]).some(active=>active.docId===doc.doc_id||(!active.docId&&active.source===doc.source));
+    toggleActiveDocument(doc.source||'',doc.doc_id||'');
+    const activeCount=(chats[currentChatId].activeDocs||[]).length;
+    let note=`Document scope set from sidebar: ${doc.source||'Unnamed upload'}`;
+    if(wasSelected){
+        note=activeCount
+            ? `Removed from comparison scope: ${doc.source||'Unnamed upload'} (${activeCount} still selected)`
+            : `Document selection cleared for ${doc.source||'Unnamed upload'}`;
+    }else if(activeCount>1){
+        note=`Added to comparison scope: ${doc.source||'Unnamed upload'} (${activeCount} selected)`;
+    }
+    appendMessageDOM('system',note);
+    pushMessage('system',note);
+}
+
+async function loadUploads(){
+    try{
+        const resp=await fetch('/uploaded-docs');
+        const data=await resp.json();
+        rememberedUploads=Array.isArray(data.documents)?data.documents:[];
+        renderUploads();
+    }catch{
+        rememberedUploads=[];
+        uploadList.innerHTML='<div class="upload-empty">Could not load uploaded files</div>';
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // Docs Drawer
 // ═══════════════════════════════════════════════════════════
 
@@ -493,7 +662,7 @@ async function resetDB(){
         renderActiveSource();
         appendMessageDOM('system','Vector DB reset.');
         pushMessage('system','Vector DB reset.');
-        loadDocs();loadHealth();
+        loadDocs();loadUploads();loadHealth();
     }
     catch(err){appendMessageDOM('system','Reset failed');}
 }
@@ -518,6 +687,7 @@ async function loadHealth(){
 loadChats();
 loadModels();
 loadHealth();
+loadUploads();
 setInterval(loadHealth,30000);
 
 // Load most recent chat or start new
@@ -532,4 +702,7 @@ chatInput.focus();
 
 @router.get("/ui", response_class=HTMLResponse)
 def chat_ui():
-    return CHAT_UI_HTML
+    if UI_INDEX_PATH.exists():
+        return FileResponse(UI_INDEX_PATH)
+    logger.warning("static UI not found at %s, serving embedded fallback UI", UI_INDEX_PATH)
+    return HTMLResponse(CHAT_UI_HTML)

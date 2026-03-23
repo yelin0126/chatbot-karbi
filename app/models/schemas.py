@@ -29,6 +29,8 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     active_source: Optional[str] = None
     active_doc_id: Optional[str] = None
+    active_sources: List[str] = Field(default_factory=list)
+    active_doc_ids: List[str] = Field(default_factory=list)
 
 
 class SourceInfo(BaseModel):
@@ -50,6 +52,8 @@ class ChatResponse(BaseModel):
     mode: str
     active_source: Optional[str] = None
     active_doc_id: Optional[str] = None
+    active_sources: List[str] = Field(default_factory=list)
+    active_doc_ids: List[str] = Field(default_factory=list)
     done: bool = True
 
 

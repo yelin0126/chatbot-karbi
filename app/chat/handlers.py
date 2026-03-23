@@ -12,12 +12,16 @@ This is how ChatGPT/Claude work — retrieve first, let the model decide.
 
 import logging
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from app.models.schemas import Message
 from app.core.llm import call_ollama, get_response_text
 from app.retrieval.retriever import retrieve, format_context, extract_sources
-from app.core.vectorstore import get_documents_by_source, get_document_chunk_count
+from app.core.vectorstore import (
+    get_documents_by_source,
+    get_documents_by_doc_ids,
+    get_document_chunk_count,
+)
 from app.config import (
     OLLAMA_MODEL,
     TAVILY_API_KEY,
@@ -120,6 +124,23 @@ def _document_not_found_answer(
         f"I couldn't find relevant information in the uploaded document '{source_name}'. "
         "Please try a more specific question."
     )
+
+
+def _normalize_active_scopes(
+    active_source: Optional[str],
+    active_doc_id: Optional[str],
+    active_sources: Optional[List[str]],
+    active_doc_ids: Optional[List[str]],
+) -> Tuple[List[str], List[str]]:
+    sources = [source for source in (active_sources or []) if source]
+    doc_ids = [doc_id for doc_id in (active_doc_ids or []) if doc_id]
+
+    if active_doc_id and active_doc_id not in doc_ids:
+        doc_ids.insert(0, active_doc_id)
+    if active_source and active_source not in sources:
+        sources.insert(0, active_source)
+
+    return sources, doc_ids
 
 
 def _infer_target_language(text: str) -> str:
@@ -299,6 +320,15 @@ def _needs_section_understanding_style(text: str) -> bool:
     return any(keyword in lower for keyword in indicators)
 
 
+def _needs_comparison_style(text: str) -> bool:
+    lower = text.lower().strip()
+    indicators = [
+        "비교", "차이", "다른 점", "공통점", "구분", "대조",
+        "compare", "comparison", "difference", "differences", "similarity",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
 def _strip_enrichment_header(text: str) -> str:
     """Remove enrichment header prepended before embedding/retrieval."""
     return re.sub(r'^\[Document:.*?\]\n', '', text or '', flags=re.DOTALL).strip()
@@ -421,6 +451,7 @@ def _build_prompt(
     doc_context: str = "",
     web_context: str = "",
     system_prompt: str = "",
+    selected_doc_count: int = 0,
 ) -> str:
     """Build a single unified prompt with all available context."""
     parts = [f"[System]\n{system_prompt or _SYSTEM_PROMPT}"]
@@ -440,6 +471,29 @@ def _build_prompt(
             "Answer as a section-understanding question. "
             "Explain the role, purpose, differences, or kinds of support described in the document. "
             "Name concrete items from the evidence instead of giving only a generic summary."
+        )
+    if selected_doc_count > 1 or _needs_comparison_style(user_message):
+        parts.append(
+            "[Comparison instruction]\n"
+            "You are answering a document-comparison question.\n"
+            "Compare only the selected documents in the retrieved document context.\n"
+            "Do not merge multiple documents into one policy or invent shared rules.\n"
+            "For each comparison point, explicitly say which document it belongs to.\n"
+            "If a point is supported by only one document, say that clearly.\n"
+            "If the evidence is insufficient for a comparison point, say it is not confirmed in the provided documents.\n"
+            "Focus only on the dimension asked by the user, such as purpose, eligibility, procedure, support, or termination.\n"
+            "Prefer a compact side-by-side structure.\n"
+            "If the user is writing in Korean, use this structure:\n"
+            "- 핵심 비교:\n"
+            "- 문서별 요약:\n"
+            "- 공통점:\n"
+            "- 차이점:\n"
+            "If the user is writing in English, use this structure:\n"
+            "- Key comparison:\n"
+            "- By document:\n"
+            "- Similarities:\n"
+            "- Differences:\n"
+            "Every section must stay grounded in the retrieved evidence."
         )
 
     history_text = _format_history(history)
@@ -467,6 +521,8 @@ def handle_chat(
     model: str = None,
     active_source: str = None,
     active_doc_id: str = None,
+    active_sources: List[str] = None,
+    active_doc_ids: List[str] = None,
     system_prompt: str = None,
 ) -> Dict[str, Any]:
     """
@@ -478,14 +534,39 @@ def handle_chat(
         model: Which Ollama model to use
         active_source: Active document filename scope for the current chat, if any
         active_doc_id: Stable document ID scope for the current chat, if any
+        active_sources: Multi-document source scope for comparison workflows
+        active_doc_ids: Multi-document doc_id scope for comparison workflows
         system_prompt: Override default system prompt
     """
     history = history or []
     selected_model = model or OLLAMA_MODEL
-    scoped_source = None if _is_smalltalk_query(user_message) else active_source
-    scoped_doc_id = None if _is_smalltalk_query(user_message) else active_doc_id
+    normalized_sources, normalized_doc_ids = _normalize_active_scopes(
+        active_source,
+        active_doc_id,
+        active_sources,
+        active_doc_ids,
+    )
+    selected_docs: List[Dict[str, str]] = []
+    max_len = max(len(normalized_sources), len(normalized_doc_ids))
+    for idx in range(max_len):
+        source = normalized_sources[idx] if idx < len(normalized_sources) else ""
+        doc_id = normalized_doc_ids[idx] if idx < len(normalized_doc_ids) else ""
+        if source or doc_id:
+            selected_docs.append({"source": source, "doc_id": doc_id})
 
-    if (scoped_source or scoped_doc_id) and _is_direct_extraction_query(user_message):
+    if not selected_docs and (active_source or active_doc_id):
+        selected_docs = [{"source": active_source or "", "doc_id": active_doc_id or ""}]
+
+    if _is_smalltalk_query(user_message):
+        selected_docs = []
+
+    multi_scope = len(selected_docs) > 1
+    scoped_source = selected_docs[0]["source"] if len(selected_docs) == 1 else None
+    scoped_doc_id = selected_docs[0]["doc_id"] if len(selected_docs) == 1 else None
+    scoped_sources = [doc["source"] for doc in selected_docs if doc.get("source")]
+    scoped_doc_ids = [doc["doc_id"] for doc in selected_docs if doc.get("doc_id")]
+
+    if len(selected_docs) == 1 and (scoped_source or scoped_doc_id) and _is_direct_extraction_query(user_message):
         docs = get_documents_by_source(source=scoped_source, doc_id=scoped_doc_id)
         if docs:
             logger.info(
@@ -499,6 +580,8 @@ def handle_chat(
                 "mode": "ocr_extract",
                 "active_source": scoped_source,
                 "active_doc_id": scoped_doc_id,
+                "active_sources": scoped_sources,
+                "active_doc_ids": scoped_doc_ids,
             }
 
     # ── Step 1: Always search for relevant document context ──
@@ -506,21 +589,33 @@ def handle_chat(
     sources = []
 
     use_full_document = bool(
-        (scoped_source or scoped_doc_id)
-        and (
-            _needs_full_document_context(user_message)
-            or _should_force_small_doc_full_context(scoped_source, scoped_doc_id)
+        multi_scope or (
+            (scoped_source or scoped_doc_id)
+            and (
+                _needs_full_document_context(user_message)
+                or _should_force_small_doc_full_context(scoped_source, scoped_doc_id)
+            )
         )
     )
-    retrieval = retrieve(
-        user_message,
-        source_filter=scoped_source,
-        doc_id_filter=scoped_doc_id,
-        full_document=use_full_document,
-    )
-    docs = retrieval.docs
 
-    if (scoped_source or scoped_doc_id) and not use_full_document:
+    retrieval = None
+    if multi_scope:
+        docs = get_documents_by_doc_ids(scoped_doc_ids)
+        logger.info(
+            "Loaded %d chunks for multi-document scope across %d selected documents",
+            len(docs),
+            len(scoped_doc_ids),
+        )
+    else:
+        retrieval = retrieve(
+            user_message,
+            source_filter=scoped_source,
+            doc_id_filter=scoped_doc_id,
+            full_document=use_full_document,
+        )
+        docs = retrieval.docs
+
+    if not multi_scope and (scoped_source or scoped_doc_id) and not use_full_document:
         threshold = (
             _scoped_confidence_threshold_for_query(
                 user_message,
@@ -547,10 +642,12 @@ def handle_chat(
                 "mode": "document_qa",
                 "active_source": active_source,
                 "active_doc_id": active_doc_id,
+                "active_sources": scoped_sources,
+                "active_doc_ids": scoped_doc_ids,
             }
 
     if docs:
-        if use_full_document:
+        if use_full_document and not multi_scope:
             scoped_docs = _filter_docs_to_named_scope(user_message, docs)
             if len(scoped_docs) != len(docs):
                 logger.info(
@@ -572,10 +669,18 @@ def handle_chat(
                     "mode": "document_qa",
                     "active_source": active_source,
                     "active_doc_id": active_doc_id,
+                    "active_sources": scoped_sources,
+                    "active_doc_ids": scoped_doc_ids,
                 }
         doc_context = format_context(docs)
         sources = extract_sources(docs)
-        if use_full_document:
+        if multi_scope:
+            logger.info(
+                "Loaded comparison context: %d chunks from %d selected documents",
+                len(docs),
+                len(scoped_doc_ids),
+            )
+        elif use_full_document:
             logger.info(
                 "Loaded full document context: %d chunks from '%s'",
                 len(docs),
@@ -598,7 +703,7 @@ def handle_chat(
 
     # ── Step 2: Check if web search might help ──
     web_context = ""
-    if not scoped_source and _might_need_web_search(user_message):
+    if not scoped_source and not multi_scope and _might_need_web_search(user_message):
         web_results = _search_web(user_message)
         if web_results:
             web_context = web_results
@@ -611,6 +716,7 @@ def handle_chat(
         doc_context=doc_context,
         web_context=web_context,
         system_prompt=system_prompt,
+        selected_doc_count=len(selected_docs),
     )
 
     result = call_ollama(prompt, model=selected_model)
@@ -627,7 +733,7 @@ def handle_chat(
     # Determine what was used (for UI display)
     mode = "general"
     if doc_context and sources:
-        mode = "document_qa"
+        mode = "document_compare" if multi_scope else "document_qa"
     if web_context:
         mode = "web_search" if not doc_context else "document_qa+web"
 
@@ -635,6 +741,8 @@ def handle_chat(
         "answer": answer,
         "sources": sources,
         "mode": mode,
-        "active_source": active_source,
-        "active_doc_id": active_doc_id,
+        "active_source": scoped_source,
+        "active_doc_id": scoped_doc_id,
+        "active_sources": scoped_sources,
+        "active_doc_ids": scoped_doc_ids,
     }

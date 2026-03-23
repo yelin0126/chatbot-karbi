@@ -13,8 +13,11 @@ The system is now in the middle stage of the product architecture:
 
 What is already working well:
 - text PDFs, scanned PDFs, and images can be uploaded
+- the built-in UI can upload one or many files at a time
 - extraction uses multiple methods with fallback routing
 - uploaded files stay scoped to chat
+- uploaded documents are remembered in the UI sidebar and can be re-selected later
+- remembered uploads can now be multi-selected for comparison-style questions
 - retrieval uses vector + keyword search
 - reranking and confidence gating are integrated
 - document identity now uses stable `doc_id`
@@ -25,7 +28,6 @@ What is already working well:
 What is still not finished:
 - retrieval threshold tuning on real Tilon documents
 - richer block-level structure storage
-- multi-document comparison
 - full QLoRA training pipeline and model comparison
 
 ## Quick Start
@@ -91,7 +93,8 @@ Why this split helps:
 2. File is saved to `data/uploads/`
 3. Parser extracts content from PDF/image
 4. Content is chunked, enriched, embedded, and stored
-5. Chat stays scoped to that uploaded file
+5. The UI sidebar remembers uploaded files from the document registry
+6. Chat can be re-scoped to any remembered upload from the sidebar
 
 ## Bigger Picture
 
@@ -167,6 +170,10 @@ What still needs tuning:
 - exact-match vs summary behavior across different document types
 - broader upload-scoped evaluation coverage beyond the first bundled-PDF benchmark
 
+Current runtime policy:
+- live chat can use hybrid retrieval without reranking by default for lower latency
+- reranking remains available for benchmark/ablation work and can be re-enabled for live chat with `LIVE_RERANKER_ENABLED=true`
+
 ## Benchmark Status
 
 Current benchmark baselines:
@@ -237,6 +244,7 @@ chatbot-karbi/
 | `POST` | `/ingest` | Ingest a folder, default `data/library/` |
 | `DELETE` | `/reset-db` | Clear vector DB |
 | `GET` | `/docs-list` | List stored chunks/documents |
+| `GET` | `/uploaded-docs` | List remembered chat uploads from the registry |
 | `POST` | `/count-keyword` | Count a keyword in a stored source file |
 | `GET` | `/v1/models` | OpenAI-compatible model list |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat |
@@ -322,6 +330,7 @@ QLoRA should begin only after these are true:
 - prompt/context format is frozen for training
 - evaluation questions exist
 - baseline results are recorded
+- the target base answer model is chosen and frozen for the training run
 
 Without those, fine-tuning will be hard to evaluate and easy to misattribute.
 

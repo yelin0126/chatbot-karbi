@@ -16,7 +16,6 @@ REQUIRED_FIELDS = {
     "id",
     "category",
     "language",
-    "document_source",
     "question",
     "should_answer_from_docs",
     "expected_answer_points",
@@ -29,6 +28,15 @@ def validate_line(obj: dict[str, Any], line_no: int) -> list[str]:
     missing = sorted(REQUIRED_FIELDS - set(obj))
     if missing:
         errors.append(f"line {line_no}: missing required fields: {', '.join(missing)}")
+
+    has_single_source = bool(str(obj.get("document_source", "")).strip())
+    has_multi_sources = isinstance(obj.get("document_sources"), list) and bool(obj.get("document_sources"))
+    if not has_single_source and not has_multi_sources:
+        errors.append(
+            f"line {line_no}: either document_source or document_sources must be provided"
+        )
+    if "document_sources" in obj and not isinstance(obj["document_sources"], list):
+        errors.append(f"line {line_no}: document_sources must be a list")
 
     if "expected_answer_points" in obj and not isinstance(obj["expected_answer_points"], list):
         errors.append(f"line {line_no}: expected_answer_points must be a list")

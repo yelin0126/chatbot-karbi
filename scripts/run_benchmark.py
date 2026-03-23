@@ -19,7 +19,7 @@ import json
 import re
 import sys
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,6 +30,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.chat.handlers import handle_chat
 from app.core.document_registry import list_documents
+from app.core.vectorstore import get_documents_by_doc_ids
 from app.retrieval.retriever import extract_sources, retrieve
 
 
@@ -50,6 +51,9 @@ class BenchmarkScope:
     source_type: str | None
     resolved: bool
     resolution_note: str
+    sources: list[str] = field(default_factory=list)
+    doc_ids: list[str] = field(default_factory=list)
+    source_types: list[str] = field(default_factory=list)
 
 
 def load_benchmark(path: Path) -> list[dict[str, Any]]:
@@ -88,6 +92,9 @@ def resolve_scope(document_source: str, preferred_source_type: str | None = None
             source=document_source,
             doc_id=None,
             source_type=None,
+            sources=[],
+            doc_ids=[],
+            source_types=[],
             resolved=False,
             resolution_note="document source not found in registry",
         )
@@ -104,6 +111,64 @@ def resolve_scope(document_source: str, preferred_source_type: str | None = None
         source=best.get("source"),
         doc_id=best.get("doc_id"),
         source_type=best.get("source_type"),
+        sources=[best.get("source")] if best.get("source") else [],
+        doc_ids=[best.get("doc_id")] if best.get("doc_id") else [],
+        source_types=[best.get("source_type")] if best.get("source_type") else [],
+        resolved=True,
+        resolution_note=note,
+    )
+
+
+def resolve_scopes(
+    document_source: str | None,
+    document_sources: list[str] | None = None,
+    preferred_source_type: str | None = None,
+) -> BenchmarkScope:
+    requested_sources = [source for source in (document_sources or []) if str(source).strip()]
+    if not requested_sources and document_source:
+        requested_sources = [document_source]
+
+    if not requested_sources:
+        return BenchmarkScope(
+            source=None,
+            doc_id=None,
+            source_type=None,
+            sources=[],
+            doc_ids=[],
+            source_types=[],
+            resolved=False,
+            resolution_note="no document source provided",
+        )
+
+    resolved_scopes = [
+        resolve_scope(source, preferred_source_type=preferred_source_type)
+        for source in requested_sources
+    ]
+    unresolved = [scope for scope in resolved_scopes if not scope.resolved]
+    if unresolved:
+        missing = ", ".join(scope.source or "unknown" for scope in unresolved)
+        return BenchmarkScope(
+            source=requested_sources[0],
+            doc_id=None,
+            source_type=None,
+            sources=[scope.source for scope in resolved_scopes if scope.source],
+            doc_ids=[scope.doc_id for scope in resolved_scopes if scope.doc_id],
+            source_types=[scope.source_type for scope in resolved_scopes if scope.source_type],
+            resolved=False,
+            resolution_note=f"one or more document sources not found in registry: {missing}",
+        )
+
+    note = resolved_scopes[0].resolution_note
+    if len(resolved_scopes) > 1:
+        note = f"matched {len(resolved_scopes)} comparison documents"
+
+    return BenchmarkScope(
+        source=resolved_scopes[0].source,
+        doc_id=resolved_scopes[0].doc_id,
+        source_type=resolved_scopes[0].source_type,
+        sources=[scope.source for scope in resolved_scopes if scope.source],
+        doc_ids=[scope.doc_id for scope in resolved_scopes if scope.doc_id],
+        source_types=[scope.source_type for scope in resolved_scopes if scope.source_type],
         resolved=True,
         resolution_note=note,
     )
@@ -233,6 +298,17 @@ def run_retrieval(item: dict[str, Any], scope: BenchmarkScope) -> dict[str, Any]
             "used_full_document": False,
         }
 
+    if len(scope.doc_ids) > 1:
+        docs = get_documents_by_doc_ids(scope.doc_ids)
+        return {
+            "resolved": True,
+            "resolution_note": scope.resolution_note,
+            "retrieved_sources": extract_sources(docs),
+            "confidence": 1.0 if docs else 0.0,
+            "strong_keyword_hit": bool(docs),
+            "used_full_document": True,
+        }
+
     result = retrieve(
         query=item["question"],
         source_filter=scope.source,
@@ -265,6 +341,8 @@ def run_answer(item: dict[str, Any], scope: BenchmarkScope, model: str | None) -
         model=model,
         active_source=scope.source,
         active_doc_id=scope.doc_id,
+        active_sources=scope.sources,
+        active_doc_ids=scope.doc_ids,
     )
     return {
         "resolved": True,
@@ -328,15 +406,17 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     with result_path.open("w", encoding="utf-8") as handle:
         for item in rows:
-            scope = resolve_scope(
-                item["document_source"],
+            scope = resolve_scopes(
+                item.get("document_source"),
+                document_sources=item.get("document_sources"),
                 preferred_source_type=item.get("scope_source_type"),
             )
             row_result: dict[str, Any] = {
                 "id": item["id"],
                 "category": item["category"],
                 "language": item["language"],
-                "document_source": item["document_source"],
+                "document_source": item.get("document_source"),
+                "document_sources": item.get("document_sources", []),
                 "question": item["question"],
                 "should_answer_from_docs": item["should_answer_from_docs"],
                 "scope": asdict(scope),

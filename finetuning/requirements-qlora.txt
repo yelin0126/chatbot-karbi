@@ -1,0 +1,8 @@
+# QLoRA / training-specific dependencies
+torch>=2.1.0
+transformers>=4.36.0
+datasets>=2.14.0
+peft>=0.7.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+

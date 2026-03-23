@@ -56,6 +56,7 @@ EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", _detect_device())
 
 # ── Reranker (NEW — not in original) ──────────────────────────────────
 RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "false").lower() == "true"
+LIVE_RERANKER_ENABLED = os.getenv("LIVE_RERANKER_ENABLED", "false").lower() == "true"
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANKER_TOP_N = int(os.getenv("RERANKER_TOP_N", "3"))
 RERANKER_DEVICE = os.getenv(

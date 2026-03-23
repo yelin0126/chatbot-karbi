@@ -100,3 +100,39 @@ After the benchmark baseline is frozen:
 4. include both:
    - positive grounded answers
    - clarification / refusal answers
+
+## Training Scaffold
+
+The repo now includes:
+
+- `finetuning/train.py`
+- `finetuning/requirements-qlora.txt`
+
+This script:
+
+1. reads `data/qlora_train_v1.jsonl`
+2. formats each sample to match the current document-QA prompt style
+3. trains a LoRA adapter on top of a frozen base model
+4. saves the adapter and a small `run_config.json`
+
+Install training dependencies first:
+
+```bash
+cd /home/tilon/chatbot-karbi
+source .venv/bin/activate
+pip install -r finetuning/requirements-qlora.txt
+```
+
+Example training command:
+
+```bash
+python finetuning/train.py \
+  --data finetuning/data/qlora_train_v1.jsonl \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --output finetuning/output/qwen25-qlora-v1
+```
+
+Important:
+
+- the current dataset is still very small, so this script is a workflow scaffold, not a final training recipe
+- serious QLoRA training should start only after `qlora_train_v1.jsonl` is expanded substantially
