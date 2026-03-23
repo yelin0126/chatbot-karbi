@@ -6,6 +6,7 @@ This keeps the system document-aware instead of relying only on filenames/chunks
 
 import json
 import logging
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -62,6 +63,15 @@ def infer_source_type(file_path: Path) -> str:
         return "upload"
     except ValueError:
         return "external"
+
+
+def compute_file_checksum(file_path: Path) -> str:
+    """Compute a stable SHA-256 checksum for reuse/dedup decisions."""
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _page_kind_counts(docs: List[Document]) -> Dict[str, int]:
@@ -157,6 +167,26 @@ def list_documents() -> List[Dict[str, Any]]:
     with _registry_lock:
         registry = _load_registry()
     return list(registry.get("documents", []))
+
+
+def find_document_by_checksum(
+    checksum: str,
+    source_type: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find an existing registry entry by file checksum."""
+    if not checksum:
+        return None
+
+    with _registry_lock:
+        registry = _load_registry()
+
+    for document in registry.get("documents", []):
+        if document.get("doc_checksum") != checksum:
+            continue
+        if source_type and document.get("source_type") != source_type:
+            continue
+        return document
+    return None
 
 
 def clear_document_registry() -> None:

@@ -16,11 +16,21 @@ from typing import Dict, Any, List
 from langchain_core.documents import Document
 
 from app.config import LIBRARY_DIR
-from app.core.document_registry import infer_source_type, upsert_document
+from app.core.document_registry import (
+    compute_file_checksum,
+    find_document_by_checksum,
+    infer_source_type,
+    upsert_document,
+)
 from app.pipeline.parser import parse_pdf, parse_image
 from app.pipeline.chunker import chunk_documents
 from app.pipeline.enricher import enrich_chunks
-from app.core.vectorstore import add_documents, delete_documents, get_ingested_sources
+from app.core.vectorstore import (
+    add_documents,
+    delete_documents,
+    get_document_chunk_count,
+    get_ingested_sources,
+)
 
 logger = logging.getLogger("tilon.ingest")
 
@@ -58,8 +68,35 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
 
     ext = file_path.suffix.lower()
     name = file_path.name
+    source_type = infer_source_type(file_path)
 
     logger.info("Ingesting single file: %s", name)
+
+    # Reuse an existing upload when the exact same file bytes were already ingested.
+    if source_type == "upload":
+        checksum = compute_file_checksum(file_path)
+        existing = find_document_by_checksum(checksum, source_type=source_type)
+        if existing:
+            existing_doc_id = existing.get("doc_id")
+            existing_chunk_count = get_document_chunk_count(
+                doc_id=existing_doc_id,
+                source_type=source_type,
+            ) if existing_doc_id else 0
+            if existing_doc_id and existing_chunk_count > 0:
+                logger.info(
+                    "Reused existing upload by checksum: %s (%s, %d chunks)",
+                    name,
+                    existing_doc_id,
+                    existing_chunk_count,
+                )
+                return {
+                    "message": f"Reused existing ingestion for {name}: {existing_chunk_count} chunks already stored.",
+                    "count": existing_chunk_count,
+                    "file": name,
+                    "doc_id": existing_doc_id,
+                    "source_type": source_type,
+                    "reused": True,
+                }
 
     # Parse based on file type
     if ext == ".pdf":

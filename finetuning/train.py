@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 import random
 from dataclasses import dataclass
@@ -113,6 +114,11 @@ def parse_args() -> argparse.Namespace:
         "--fp16",
         action="store_true",
         help="Force fp16 training args. Use when bf16 is not supported.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate dataset formatting and split without loading training dependencies or model weights.",
     )
     return parser.parse_args()
 
@@ -255,6 +261,44 @@ def _find_lora_target_modules(model) -> List[str]:
 
 def main() -> None:
     args = parse_args()
+
+    data_path = Path(args.data)
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = _validate_rows(_read_jsonl(data_path), data_path)
+    formatted = format_samples(rows, system_prompt=args.system_prompt)
+    train_samples, eval_samples = split_samples(
+        formatted,
+        eval_ratio=args.eval_ratio,
+        seed=args.seed,
+    )
+
+    summary = {
+        "data_path": str(data_path),
+        "model": args.model,
+        "total_samples": len(formatted),
+        "train_samples": len(train_samples),
+        "eval_samples": len(eval_samples),
+        "max_seq_len": args.max_seq_len,
+        "dry_run": args.dry_run,
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+        "system_prompt": args.system_prompt,
+        "languages": sorted({sample.language for sample in formatted if sample.language}),
+        "sample_ids_preview": [sample.sample_id for sample in formatted[:5]],
+    }
+    (output_dir / "run_config.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    if args.dry_run:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print("\nDry run complete: dataset, formatting, and split are valid.")
+        return
+
     _require_training_dependencies()
 
     from datasets import Dataset
@@ -267,18 +311,6 @@ def main() -> None:
         DataCollatorForSeq2Seq,
         Trainer,
         TrainingArguments,
-    )
-
-    data_path = Path(args.data)
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    rows = _validate_rows(_read_jsonl(data_path), data_path)
-    formatted = format_samples(rows, system_prompt=args.system_prompt)
-    train_samples, eval_samples = split_samples(
-        formatted,
-        eval_ratio=args.eval_ratio,
-        seed=args.seed,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
@@ -329,9 +361,6 @@ def main() -> None:
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
-            "sample_id": sample.sample_id,
-            "source_benchmark_id": sample.source_benchmark_id,
-            "language": sample.language,
         }
 
     train_dataset = Dataset.from_list([encode_sample(sample) for sample in train_samples])
@@ -344,28 +373,36 @@ def main() -> None:
         return_tensors="pt",
     )
 
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        num_train_epochs=args.epochs,
-        learning_rate=args.lr,
-        warmup_ratio=args.warmup_ratio,
-        weight_decay=args.weight_decay,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        save_total_limit=2,
-        evaluation_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=args.save_steps if eval_dataset is not None else None,
-        bf16=args.bf16,
-        fp16=args.fp16,
-        gradient_checkpointing=True,
-        lr_scheduler_type="cosine",
-        report_to=[],
-        remove_unused_columns=False,
-        seed=args.seed,
-    )
+    training_kwargs = {
+        "output_dir": str(output_dir),
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "num_train_epochs": args.epochs,
+        "learning_rate": args.lr,
+        "warmup_ratio": args.warmup_ratio,
+        "weight_decay": args.weight_decay,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "save_total_limit": 2,
+        "eval_steps": args.save_steps if eval_dataset is not None else None,
+        "bf16": args.bf16,
+        "fp16": args.fp16,
+        "gradient_checkpointing": True,
+        "lr_scheduler_type": "cosine",
+        "report_to": [],
+        "remove_unused_columns": False,
+        "seed": args.seed,
+    }
+
+    strategy_value = "steps" if eval_dataset is not None else "no"
+    training_signature = inspect.signature(TrainingArguments.__init__)
+    if "eval_strategy" in training_signature.parameters:
+        training_kwargs["eval_strategy"] = strategy_value
+    else:
+        training_kwargs["evaluation_strategy"] = strategy_value
+
+    training_args = TrainingArguments(**training_kwargs)
 
     trainer = Trainer(
         model=model,
@@ -376,19 +413,7 @@ def main() -> None:
         data_collator=data_collator,
     )
 
-    summary = {
-        "data_path": str(data_path),
-        "model": args.model,
-        "train_samples": len(train_samples),
-        "eval_samples": len(eval_samples),
-        "max_seq_len": args.max_seq_len,
-        "use_4bit": use_4bit,
-        "lora_r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "lora_dropout": args.lora_dropout,
-        "system_prompt": args.system_prompt,
-        "languages": sorted({sample.language for sample in formatted if sample.language}),
-    }
+    summary["use_4bit"] = use_4bit
     (output_dir / "run_config.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",

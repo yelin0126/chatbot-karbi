@@ -720,24 +720,6 @@
 
         .input-box:focus-within { border-color: var(--accent); }
 
-        .attach-btn {
-            width: 32px;
-            height: 32px;
-            background: #fff;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--ts);
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            flex-shrink: 0;
-        }
-
-        .attach-btn:hover { border-color: var(--accent); color: var(--accent); }
-        .attach-btn.has-files { border-color: var(--accent); color: var(--accent); background: rgba(37, 99, 235, 0.06); }
-
         #msg-input {
             flex: 1;
             background: none;
@@ -986,13 +968,11 @@
                 <button class="banner-close" onclick="clearFiles()" title="첨부 제거">✕</button>
             </div>
             <div class="input-box">
-                <button class="attach-btn" id="attach-btn" onclick="document.getElementById('file-input').click()">📎</button>
-                <textarea id="msg-input" rows="1" placeholder="메시지 입력... (Shift+Enter 줄바꿈)"></textarea>
+                <textarea id="msg-input" rows="1" placeholder="메시지 입력... (파일 업로드는 왼쪽 보관소에서 진행)"></textarea>
                 <button class="stop-btn" id="stop-btn" onclick="stopGeneration()" style="display:none">⏹</button>
                 <button class="send-btn" id="send-btn" onclick="sendMsg()">➤</button>
             </div>
             <div class="input-hint">AI가 실수할 수 있습니다. 중요한 정보는 반드시 확인하세요.</div>
-            <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple style="display:none">
         </div>
     </div>
 </div>
@@ -1017,15 +997,13 @@ let systemPrompt = localStorage.getItem('ai_sys_prompt') || '당신은 사내 AI
 let chats = normalizeChats(JSON.parse(localStorage.getItem(CHAT_KEY) || '[]'));
 let uploadedDocs = normalizeDocs(JSON.parse(localStorage.getItem(DOC_KEY) || '[]'));
 let currentChatId = null;
-let pendingFiles = [];
-
 const msgInput = document.getElementById('msg-input');
-const fileInput = document.getElementById('file-input');
-const attachBtn = document.getElementById('attach-btn');
 const fileBanner = document.getElementById('file-banner');
 const fileText = document.getElementById('file-text');
 const scopeBanner = document.getElementById('scope-banner');
+const scopeLabel = scopeBanner ? scopeBanner.querySelector('.scope-label') : null;
 const scopeText = document.getElementById('scope-text');
+const scopeBannerClose = scopeBanner ? scopeBanner.querySelector('.banner-close') : null;
 const shelfSearch = document.getElementById('shelf-search');
 const modelSelect = document.getElementById('model-select');
 const selectedStat = document.getElementById('selected-stat');
@@ -1166,57 +1144,42 @@ function formatBytes(bytes) {
 }
 
 function renderPendingFiles() {
-    if (!pendingFiles.length) {
-        fileBanner.classList.remove('visible');
-        fileText.textContent = '';
-        attachBtn.classList.remove('has-files');
-        return;
-    }
-    const totalBytes = pendingFiles.reduce((sum, file) => sum + (file.size || 0), 0);
-    const names = pendingFiles.slice(0, 2).map(file => file.name);
-    const summary = pendingFiles.length > 2 ? `${names.join(', ')} 외 ${pendingFiles.length - 2}개` : names.join(', ');
-    fileText.textContent = `${summary} (${pendingFiles.length}개, ${formatBytes(totalBytes)})`;
-    fileBanner.classList.add('visible');
-    attachBtn.classList.add('has-files');
+    fileBanner.classList.remove('visible');
+    fileText.textContent = '';
 }
 
 function clearFiles() {
-    pendingFiles = [];
     renderPendingFiles();
 }
-
-fileInput.addEventListener('change', () => {
-    if (fileInput.files.length > 0) {
-        const seen = new Set(pendingFiles.map(file => `${file.name}::${file.size}::${file.lastModified}`));
-        for (const file of Array.from(fileInput.files)) {
-            const key = `${file.name}::${file.size}::${file.lastModified}`;
-            if (!seen.has(key)) {
-                pendingFiles.push(file);
-                seen.add(key);
-            }
-        }
-        renderPendingFiles();
-        msgInput.focus();
-    }
-    fileInput.value = '';
-});
 
 function renderScopeBanner() {
     const chat = currentChat();
     const activeDocs = chat ? (chat.activeDocs || []) : [];
-    selectedStat.textContent = `선택 ${activeDocs.length}`;
+    const hasUploads = uploadedDocs.length > 0;
     if (!activeDocs.length) {
-        scopeBanner.classList.remove('visible');
-        scopeText.textContent = '';
+        selectedStat.textContent = hasUploads ? '전체 업로드 검색' : '선택 0';
+        if (hasUploads) {
+            if (scopeLabel) scopeLabel.textContent = '검색 범위';
+            scopeText.textContent = '선택된 파일 없음 -> 업로드된 모든 파일에서 검색';
+            if (scopeBannerClose) scopeBannerClose.style.display = 'none';
+            scopeBanner.classList.add('visible');
+        } else {
+            scopeBanner.classList.remove('visible');
+            scopeText.textContent = '';
+            if (scopeBannerClose) scopeBannerClose.style.display = '';
+        }
         selectionTray.classList.remove('visible');
         selectionChips.innerHTML = '';
         return;
     }
+    selectedStat.textContent = `선택 ${activeDocs.length}`;
+    if (scopeLabel) scopeLabel.textContent = '검색 범위';
     if (activeDocs.length === 1) {
-        scopeText.textContent = activeDocs[0].source || activeDocs[0].docId || '선택 문서';
+        scopeText.textContent = `선택된 파일만 검색: ${activeDocs[0].source || activeDocs[0].docId || '선택 문서'}`;
     } else {
-        scopeText.textContent = `${activeDocs.length}개 문서 비교 선택됨`;
+        scopeText.textContent = `${activeDocs.length}개 선택됨 -> 선택한 파일들로만 좁혀서 검색`;
     }
+    if (scopeBannerClose) scopeBannerClose.style.display = '';
     scopeBanner.classList.add('visible');
     selectionTray.classList.add('visible');
     selectionChips.innerHTML = activeDocs.map(doc => {
@@ -1384,7 +1347,7 @@ function loadChat(id) {
         messages.innerHTML = `<div class="welcome" id="welcome">
             <img class="wi" src="/static/otter-mascot.png" alt="수달 마스코트">
             <h2>무엇을 도와드릴까요?</h2>
-            <p>파일을 업로드해 보관소에 쌓아 두고, 왼쪽에서 한 개 또는 여러 개를 선택해 문서 질문이나 비교 질문을 해보세요.</p>
+            <p>파일을 업로드하면 보관소에 저장됩니다. 파일을 선택하지 않으면 업로드된 모든 파일에서 검색하고, 하나 이상 선택하면 선택한 파일들로만 범위를 좁혀 답변합니다.</p>
             <div class="quick-btns">
                 <button class="qb" onclick="quickMsg('이 문서의 핵심 내용을 요약해줘')">문서 요약</button>
                 <button class="qb" onclick="quickMsg('지원 대상은 어떻게 돼?')">정확 질의</button>
@@ -1644,6 +1607,7 @@ async function sendChatRequest(text, history, docScope) {
         model: currentModel || undefined,
         active_source: docScope.singleSource || null,
         active_doc_id: docScope.singleDocId || null,
+        active_source_type: docScope.sourceType || null,
         active_sources: docScope.sources,
         active_doc_ids: docScope.docIds
     };
@@ -1659,7 +1623,7 @@ async function sendChatRequest(text, history, docScope) {
 async function sendMsg() {
     if (isLoading) return;
     const text = msgInput.value.trim();
-    const files = pendingFiles.slice();
+    const files = [];
     if (!text && !files.length) return;
 
     const welcome = document.getElementById('welcome');
@@ -1789,6 +1753,7 @@ async function sendMsg() {
             const docScope = {
                 singleSource: activeDocs.length === 1 ? (activeDocs[0].source || '') : '',
                 singleDocId: activeDocs.length === 1 ? (activeDocs[0].docId || '') : '',
+                sourceType: !activeDocs.length && uploadedDocs.length ? 'upload' : '',
                 sources: activeDocs.map(doc => doc.source).filter(Boolean),
                 docIds: activeDocs.map(doc => doc.docId).filter(Boolean)
             };
@@ -1847,9 +1812,7 @@ function renderMsg(message, scroll) {
 
     const modeHtml = message.mode ? `<span class="mode-pill">${esc(message.mode)}</span>` : '';
     const fileHtml = message.fileName ? `<div class="msg-file">📎 ${esc(message.fileName)}</div>` : '';
-    const sourceHtml = Array.isArray(message.sources) && message.sources.length
-        ? `<div class="msg-foot">${modeHtml}${message.sources.map(source => `<span class="src-tag">${esc((source.source || '?') + ' p.' + (source.page || '?'))}</span>`).join('')}</div>`
-        : (modeHtml ? `<div class="msg-foot">${modeHtml}</div>` : '');
+    const sourceHtml = modeHtml ? `<div class="msg-foot">${modeHtml}</div>` : '';
 
     group.innerHTML = `
         <div class="msg-meta">

@@ -93,6 +93,8 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 # ── VLM PDF Extraction (NEW) ─────────────────────────────────────────
 VLM_EXTRACTION_ENABLED = os.getenv("VLM_EXTRACTION_ENABLED", "true").lower() == "true"
+VLM_SCANNED_PDF_ENABLED = os.getenv("VLM_SCANNED_PDF_ENABLED", "true").lower() == "true"
+VLM_HYBRID_PDF_ENABLED = os.getenv("VLM_HYBRID_PDF_ENABLED", "false").lower() == "true"
 VLM_EXTRACTION_MODEL = os.getenv("VLM_EXTRACTION_MODEL", "qwen2.5vl:7b")
 
 # ── Logging ───────────────────────────────────────────────────────────

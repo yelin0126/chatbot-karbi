@@ -22,6 +22,7 @@ from app.core.vectorstore import (
     get_documents_by_doc_ids,
     get_document_chunk_count,
 )
+from app.core.document_registry import list_documents
 from app.config import (
     OLLAMA_MODEL,
     TAVILY_API_KEY,
@@ -126,6 +127,115 @@ def _document_not_found_answer(
     )
 
 
+def _document_corpus_not_found_answer(user_message: str, source_type: Optional[str]) -> str:
+    """Return a grounded fallback for scoped corpus search such as all uploads."""
+    scope_name = "uploaded documents" if source_type == "upload" else "selected documents"
+    if re.search(r"[가-힣]", user_message):
+        return (
+            f"{'업로드된 문서들' if source_type == 'upload' else '선택된 문서들'}에서 "
+            "질문과 관련된 정보를 찾지 못했습니다. 질문을 조금 더 구체적으로 해주세요."
+        )
+    return (
+        f"I couldn't find relevant information in the {scope_name}. "
+        "Please try a more specific question."
+    )
+
+
+def _looks_like_entity_explanation_query(text: str) -> bool:
+    """Detect broad fact/explanation questions that are risky without grounding."""
+    lower = (text or "").lower().strip()
+    indicators = [
+        "에 대해서", "에 대해", "무엇", "뭐야", "누구", "설명해", "말해줘",
+        "what is", "who is", "tell me about", "explain", "what does",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _document_first_clarification_answer(user_message: str) -> str:
+    """Ask the user to pick document scope instead of answering from model memory."""
+    uploads = [doc for doc in list_documents() if doc.get("source_type") == "upload"]
+    upload_names = [doc.get("source") for doc in uploads if doc.get("source")]
+    examples = ", ".join(f"'{name}'" for name in upload_names[:2])
+
+    if re.search(r"[가-힣]", user_message):
+        if examples:
+            return (
+                "현재 선택된 문서 범위가 없어 업로드 문서를 기준으로는 답변할 수 없습니다. "
+                f"왼쪽 보관소에서 문서를 선택한 뒤 다시 질문해 주세요. 예: {examples}"
+            )
+        return (
+            "현재 선택된 문서 범위가 없습니다. 왼쪽 보관소에서 문서를 선택하거나 파일을 업로드한 뒤 다시 질문해 주세요."
+        )
+
+    if examples:
+        return (
+            "No document is currently selected, so I can't answer this as a grounded document question. "
+            f"Please select an uploaded document from the left shelf and ask again, for example: {examples}"
+        )
+    return (
+        "No document is currently selected. Please choose an uploaded document or upload a file and ask again."
+    )
+
+
+def _extract_mention_candidate(text: str) -> Optional[str]:
+    """Extract the entity/topic being asked about from a broad explanation query."""
+    stripped = (text or "").strip()
+    ko_patterns = [
+        r"(.+?)에\s*대해서\s*(?:말해줘|설명해줘|알려줘)?$",
+        r"(.+?)에\s*대해\s*(?:말해줘|설명해줘|알려줘)?$",
+    ]
+    en_patterns = [
+        r"(?:who is|what is|tell me about|explain)\s+(.+?)\??$",
+    ]
+
+    for pattern in ko_patterns + en_patterns:
+        match = re.search(pattern, stripped, flags=re.IGNORECASE)
+        if match:
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" '\"?.,")
+            if candidate:
+                return candidate
+    return None
+
+
+def _find_mention_pages(docs, mention: str) -> List[int]:
+    """Return pages where the requested mention appears in the document text."""
+    pages = []
+    needle = (mention or "").strip().lower()
+    if not needle:
+        return pages
+
+    for doc in docs:
+        haystack = _strip_enrichment_header(doc.page_content).lower()
+        if needle in haystack:
+            page = doc.metadata.get("page")
+            if isinstance(page, int) and page not in pages:
+                pages.append(page)
+    return pages
+
+
+def _build_mention_only_answer(
+    user_message: str,
+    active_source: Optional[str],
+    mention: str,
+    pages: List[int],
+) -> str:
+    """Return a safer answer when a document only mentions a term without explaining it."""
+    source_name = active_source or "the uploaded document"
+    page_text = ""
+    if pages:
+        page_text = f" (page {pages[0]})" if len(pages) == 1 else f" (pages {', '.join(str(page) for page in pages[:3])})"
+
+    if re.search(r"[가-힣]", user_message):
+        return (
+            f"문서 '{source_name}'{page_text}에서 '{mention}'이 언급되지만, "
+            "해당 대상에 대한 별도의 설명이나 정의는 제공되지 않습니다."
+        )
+    return (
+        f"The document '{source_name}'{page_text} mentions '{mention}', "
+        "but it does not provide a further explanation or definition."
+    )
+
+
 def _normalize_active_scopes(
     active_source: Optional[str],
     active_doc_id: Optional[str],
@@ -189,6 +299,7 @@ def _is_direct_extraction_query(text: str) -> bool:
     indicators = [
         "텍스트 추출", "문자 추출", "글자 추출", "읽어줘", "텍스트만", "원문", "ocr",
         "내용 추출", "내용 보여", "전문 보여", "본문 보여", "여기 안에 있는 내용 추출",
+        "가사 추출", "가사 보여", "가사 읽어", "lyrics", "lyric",
         "what does this image say", "what does the image say",
         "give me the text", "extract the text", "read the text",
         "read this image", "text in the image", "transcribe",
@@ -521,6 +632,7 @@ def handle_chat(
     model: str = None,
     active_source: str = None,
     active_doc_id: str = None,
+    active_source_type: str = None,
     active_sources: List[str] = None,
     active_doc_ids: List[str] = None,
     system_prompt: str = None,
@@ -534,6 +646,7 @@ def handle_chat(
         model: Which Ollama model to use
         active_source: Active document filename scope for the current chat, if any
         active_doc_id: Stable document ID scope for the current chat, if any
+        active_source_type: Scope to a whole source type such as "upload"
         active_sources: Multi-document source scope for comparison workflows
         active_doc_ids: Multi-document doc_id scope for comparison workflows
         system_prompt: Override default system prompt
@@ -611,9 +724,38 @@ def handle_chat(
             user_message,
             source_filter=scoped_source,
             doc_id_filter=scoped_doc_id,
+            source_type_filter=active_source_type if not selected_docs else None,
             full_document=use_full_document,
         )
         docs = retrieval.docs
+
+    if (
+        not multi_scope
+        and not selected_docs
+        and active_source_type
+        and not use_full_document
+    ):
+        if not docs or (
+            retrieval.confidence < DOCUMENT_CONFIDENCE_THRESHOLD
+            and not retrieval.strong_keyword_hit
+        ):
+            logger.info(
+                "Low-confidence corpus retrieval for source_type='%s' (confidence=%.2f, threshold=%.2f, keyword_hit=%s)",
+                active_source_type,
+                retrieval.confidence if retrieval else 0.0,
+                DOCUMENT_CONFIDENCE_THRESHOLD,
+                retrieval.strong_keyword_hit if retrieval else False,
+            )
+            return {
+                "answer": _document_corpus_not_found_answer(user_message, active_source_type),
+                "sources": [],
+                "mode": "document_qa",
+                "active_source": None,
+                "active_doc_id": None,
+                "active_source_type": active_source_type,
+                "active_sources": [],
+                "active_doc_ids": [],
+            }
 
     if not multi_scope and (scoped_source or scoped_doc_id) and not use_full_document:
         threshold = (
@@ -628,6 +770,32 @@ def handle_chat(
             retrieval.confidence < threshold
             and not retrieval.strong_keyword_hit
         ):
+            mention_candidate = _extract_mention_candidate(user_message)
+            if mention_candidate:
+                scoped_all_docs = get_documents_by_source(source=scoped_source, doc_id=scoped_doc_id)
+                mention_pages = _find_mention_pages(scoped_all_docs, mention_candidate)
+                if mention_pages:
+                    logger.info(
+                        "Mention-only scoped answer for '%s'%s -> '%s' on pages %s",
+                        active_source or "scoped document",
+                        f" ({scoped_doc_id})" if scoped_doc_id else "",
+                        mention_candidate,
+                        mention_pages,
+                    )
+                    return {
+                        "answer": _build_mention_only_answer(
+                            user_message,
+                            active_source,
+                            mention_candidate,
+                            mention_pages,
+                        ),
+                        "sources": [],
+                        "mode": "document_qa",
+                        "active_source": active_source,
+                        "active_doc_id": active_doc_id,
+                        "active_sources": scoped_sources,
+                        "active_doc_ids": scoped_doc_ids,
+                    }
             logger.info(
                 "Low-confidence scoped retrieval for '%s'%s (confidence=%.2f, threshold=%.2f, keyword_hit=%s)",
                 active_source or "scoped document",
@@ -642,6 +810,7 @@ def handle_chat(
                 "mode": "document_qa",
                 "active_source": active_source,
                 "active_doc_id": active_doc_id,
+                "active_source_type": active_source_type,
                 "active_sources": scoped_sources,
                 "active_doc_ids": scoped_doc_ids,
             }
@@ -669,6 +838,7 @@ def handle_chat(
                     "mode": "document_qa",
                     "active_source": active_source,
                     "active_doc_id": active_doc_id,
+                    "active_source_type": active_source_type,
                     "active_sources": scoped_sources,
                     "active_doc_ids": scoped_doc_ids,
                 }
@@ -700,6 +870,25 @@ def handle_chat(
             )
     else:
         logger.info("No relevant document chunks found")
+        uploads_exist = any(doc.get("source_type") == "upload" for doc in list_documents())
+        if (
+            not selected_docs
+            and not active_source_type
+            and uploads_exist
+            and not _might_need_web_search(user_message)
+            and _looks_like_entity_explanation_query(user_message)
+        ):
+            logger.info("Document-first clarification triggered for unscoped query with existing uploads")
+            return {
+                "answer": _document_first_clarification_answer(user_message),
+                "sources": [],
+                "mode": "document_qa",
+                "active_source": None,
+                "active_doc_id": None,
+                "active_source_type": active_source_type,
+                "active_sources": [],
+                "active_doc_ids": [],
+            }
 
     # ── Step 2: Check if web search might help ──
     web_context = ""
@@ -743,6 +932,7 @@ def handle_chat(
         "mode": mode,
         "active_source": scoped_source,
         "active_doc_id": scoped_doc_id,
+        "active_source_type": active_source_type,
         "active_sources": scoped_sources,
         "active_doc_ids": scoped_doc_ids,
     }

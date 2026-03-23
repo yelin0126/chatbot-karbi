@@ -17,6 +17,7 @@ import base64
 import hashlib
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -32,6 +33,8 @@ from app.config import (
     MARKER_OUTPUT_DIR,
     OLLAMA_BASE_URL,
     VLM_EXTRACTION_ENABLED,
+    VLM_SCANNED_PDF_ENABLED,
+    VLM_HYBRID_PDF_ENABLED,
     VLM_EXTRACTION_MODEL,
 )
 
@@ -47,6 +50,7 @@ _HEADING_MAX_CHARS = 120
 _HEADING_MAX_LINES = 3
 _TABLE_LINE_BREAK_THRESHOLD = 3
 _MARKER_FALLBACK_RATIO = 1.75
+_SLOW_PAGE_LOG_MS = 1500
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -632,8 +636,8 @@ def _vlm_extract_page(image_base64: str, page_num: int, timeout: int = 60) -> st
 # Max consecutive VLM failures before aborting (avoids 28min stall)
 _VLM_MAX_CONSECUTIVE_FAILURES = 2
 # First page gets extra time for cold model loading
-_VLM_FIRST_PAGE_TIMEOUT = 180  # Cold start: Ollama loads model into GPU
-_VLM_PAGE_TIMEOUT = 60
+_VLM_FIRST_PAGE_TIMEOUT = 90
+_VLM_PAGE_TIMEOUT = 30
 
 
 def _extract_with_vlm(pdf_path: str, artifact_meta: dict) -> List[Document]:
@@ -855,12 +859,34 @@ def _select_best_page_candidate(
     scored.sort(key=lambda item: item[0], reverse=True)
     best_score, best_doc = scored[0]
 
-    # Prefer the original text layer when it is close in quality. It tends to
-    # preserve exact wording better than OCR/VLM for born-digital PDFs.
     text_doc = next(
         (doc for score, doc in scored if doc.metadata.get("extraction_method") == "text"),
         None,
     )
+    ocr_doc = next(
+        (doc for score, doc in scored if doc.metadata.get("extraction_method") == "ocr"),
+        None,
+    )
+
+    # For hybrid/scanned pages, prefer OCR when it clearly captures much more
+    # text than the thin text layer. This is common for lyric sheets, posters,
+    # and image-heavy pages where PyMuPDF only sees headings or fragments.
+    if page_kind_hint in {"hybrid", "scanned"} and text_doc is not None and ocr_doc is not None:
+        text_real_chars = int(text_doc.metadata.get("real_char_count") or 0)
+        ocr_real_chars = int(ocr_doc.metadata.get("real_char_count") or 0)
+        ocr_gib_ratio = float(ocr_doc.metadata.get("gibberish_ratio") or 1.0)
+        text_flags = set((text_doc.metadata.get("quality_flags") or "").split(",")) - {""}
+        if (
+            ocr_gib_ratio <= _GIBBERISH_THRESHOLD
+            and (
+                ocr_real_chars >= max(40, text_real_chars * 2)
+                or ("low_text_yield" in text_flags and ocr_real_chars >= text_real_chars + 20)
+            )
+        ):
+            return ocr_doc
+
+    # Prefer the original text layer when it is close in quality. It tends to
+    # preserve exact wording better than OCR/VLM for born-digital PDFs.
     if text_doc is not None:
         text_score = next(
             score
@@ -878,12 +904,29 @@ def _select_best_page_candidate(
     return best_doc
 
 
+def _candidate_is_good_enough(candidate: Optional[Document], page_kind_hint: str) -> bool:
+    """Decide whether a fallback candidate is good enough to skip slower VLM."""
+    if candidate is None:
+        return False
+
+    method = str(candidate.metadata.get("extraction_method") or "")
+    real_chars = int(candidate.metadata.get("real_char_count") or 0)
+    gib_ratio = float(candidate.metadata.get("gibberish_ratio") or 1.0)
+    if method == "ocr":
+        min_real_chars = 30 if page_kind_hint in {"scanned", "hybrid"} else _PAGE_MIN_REAL_CHARS
+    else:
+        min_real_chars = 30 if page_kind_hint == "scanned" else _PAGE_MIN_REAL_CHARS
+
+    return real_chars >= min_real_chars and gib_ratio <= _GIBBERISH_THRESHOLD
+
+
 def _parse_pdf_page(
     page: fitz.Page,
     pdf_path: str,
     artifact_meta: Dict[str, Any],
 ) -> Optional[Document]:
     """Parse one PDF page with quality-gated routing."""
+    started_at = time.perf_counter()
     page_num = page.number + 1
     page_analysis = _analyze_pymupdf_page(page)
     candidates: List[Document] = []
@@ -915,8 +958,49 @@ def _parse_pdf_page(
 
     fallback_chain = ["pymupdf"]
     rendered_page = _render_pdf_page_image(pdf_path, page_num, dpi=max(_OCR_RENDER_DPI, _VLM_RENDER_DPI))
+    ocr_candidate: Optional[Document] = None
 
+    if rendered_page is not None and ENABLE_OCR:
+        ocr_text = pytesseract.image_to_string(rendered_page, lang="kor+eng")
+        if ocr_text and len(ocr_text.strip()) >= 10:
+            ocr_chain = fallback_chain + ["tesseract"]
+            ocr_candidate = _build_page_candidate_document(
+                text=ocr_text,
+                artifact_meta=artifact_meta,
+                page_num=page_num,
+                method="ocr",
+                page_analysis=page_analysis,
+                routing_reason=routing_reason,
+                fallback_chain=">".join(ocr_chain),
+            )
+            if ocr_candidate is not None:
+                candidates.append(ocr_candidate)
+
+    text_candidate = next(
+        (candidate for candidate in candidates if candidate.metadata.get("extraction_method") == "text"),
+        None,
+    )
+    text_good_enough = _candidate_is_good_enough(text_candidate, page_analysis["page_kind"])
+    ocr_good_enough = _candidate_is_good_enough(ocr_candidate, page_analysis["page_kind"])
+
+    should_try_vlm = False
     if rendered_page is not None and VLM_EXTRACTION_ENABLED:
+        if page_analysis["page_kind"] == "scanned":
+            should_try_vlm = VLM_SCANNED_PDF_ENABLED and not ocr_good_enough
+        elif page_analysis["page_kind"] == "hybrid":
+            should_try_vlm = (
+                VLM_HYBRID_PDF_ENABLED
+                and not text_good_enough
+                and not ocr_good_enough
+            )
+        else:
+            should_try_vlm = (
+                page_analysis["gibberish_ratio"] > _GIBBERISH_THRESHOLD
+                and not text_good_enough
+                and not ocr_good_enough
+            )
+
+    if should_try_vlm:
         timeout = _VLM_FIRST_PAGE_TIMEOUT if page_num == 1 else _VLM_PAGE_TIMEOUT
         vlm_text = _vlm_extract_page(_image_to_base64(rendered_page), page_num, timeout=timeout)
         if vlm_text and len(vlm_text.strip()) >= 10:
@@ -933,34 +1017,23 @@ def _parse_pdf_page(
             if candidate is not None:
                 candidates.append(candidate)
 
-    if rendered_page is not None and ENABLE_OCR:
-        ocr_text = pytesseract.image_to_string(rendered_page, lang="kor+eng")
-        if ocr_text and len(ocr_text.strip()) >= 10:
-            ocr_chain = fallback_chain + ["tesseract"]
-            candidate = _build_page_candidate_document(
-                text=ocr_text,
-                artifact_meta=artifact_meta,
-                page_num=page_num,
-                method="ocr",
-                page_analysis=page_analysis,
-                routing_reason=routing_reason,
-                fallback_chain=">".join(ocr_chain),
-            )
-            if candidate is not None:
-                candidates.append(candidate)
-
     selected = _select_best_page_candidate(
         [candidate for candidate in candidates if candidate is not None],
         page_analysis["page_kind"],
     )
 
     if selected is not None:
-        logger.debug(
-            "  → Page %d: %s selected (kind=%s, reason=%s)",
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
+        log_fn = logger.info if elapsed_ms >= _SLOW_PAGE_LOG_MS else logger.debug
+        log_fn(
+            "  → Page %d: %s selected (kind=%s, reason=%s, %.1fms, vlm=%s, ocr=%s)",
             page_num,
             selected.metadata.get("extractors_used"),
             selected.metadata.get("page_kind"),
             selected.metadata.get("routing_reason"),
+            elapsed_ms,
+            "yes" if should_try_vlm else "no",
+            "yes" if ocr_candidate is not None else "no",
         )
 
     return selected

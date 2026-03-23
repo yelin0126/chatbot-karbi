@@ -178,6 +178,85 @@ def add_two_column_slide(
             p.space_after = Pt(8)
 
 
+def add_rag_pipeline_slide(prs: Presentation) -> None:
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    set_bg(slide)
+    add_header_band(slide, "RAG 파이프라인", "현재 시스템의 핵심 처리 흐름")
+
+    steps = [
+        ("1. 입력", "PDF / 스캔 PDF / 이미지 업로드\n라이브러리 문서 또는 채팅 업로드"),
+        ("2. 파싱", "Marker / PyMuPDF / Qwen2.5-VL / Tesseract\n페이지 단위 라우팅"),
+        ("3. 청킹/임베딩", "시맨틱 청킹\n컨텍스트 헤더 강화\nBGE-M3 임베딩"),
+        ("4. 저장", "ChromaDB 저장\nKeyword index 구축\n문서 레지스트리 기록"),
+        ("5. 검색", "Vector + Keyword\nRRF 융합\n필요시 reranker"),
+        ("6. 답변", "문서 스코프 QA\n업로드 문서 비교\n거절/명확화 응답"),
+    ]
+
+    start_x = 0.55
+    y = 1.5
+    box_w = 2.0
+    box_h = 1.55
+    gap = 0.15
+
+    for idx, (title, detail) in enumerate(steps):
+        x = Inches(start_x + idx * (box_w + gap))
+        box = slide.shapes.add_shape(
+            MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, x, Inches(y), Inches(box_w), Inches(box_h)
+        )
+        box.fill.solid()
+        box.fill.fore_color.rgb = PANEL
+        box.line.color.rgb = ACCENT if idx % 2 == 0 else ACCENT_2
+
+        title_box = slide.shapes.add_textbox(x + Inches(0.12), Inches(y + 0.1), Inches(1.75), Inches(0.28))
+        p = title_box.text_frame.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        r = p.add_run()
+        r.text = title
+        r.font.size = Pt(16)
+        r.font.bold = True
+        r.font.color.rgb = TEXT
+
+        detail_box = slide.shapes.add_textbox(x + Inches(0.12), Inches(y + 0.42), Inches(1.75), Inches(0.9))
+        p = detail_box.text_frame.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        r = p.add_run()
+        r.text = detail
+        r.font.size = Pt(11)
+        r.font.color.rgb = SUBTEXT
+
+        if idx < len(steps) - 1:
+            arrow = slide.shapes.add_textbox(
+                x + Inches(box_w - 0.02), Inches(y + 0.56), Inches(0.2), Inches(0.25)
+            )
+            p = arrow.text_frame.paragraphs[0]
+            p.alignment = PP_ALIGN.CENTER
+            r = p.add_run()
+            r.text = "→"
+            r.font.size = Pt(18)
+            r.font.bold = True
+            r.font.color.rgb = ACCENT
+
+    lower = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(1.0), Inches(4.1), Inches(11.2), Inches(1.7)
+    )
+    lower.fill.solid()
+    lower.fill.fore_color.rgb = RGBColor(16, 28, 46)
+    lower.line.color.rgb = ACCENT
+
+    body = slide.shapes.add_textbox(Inches(1.25), Inches(4.35), Inches(10.7), Inches(1.2))
+    tf = body.text_frame
+    notes = [
+        "현재 강점: 입력부터 검색까지의 RAG 파이프라인은 안정화 단계",
+        "현재 보완점: 비교형 질문 품질, 실시간 지연시간, 한글 중심 QLoRA 학습 데이터 확대",
+    ]
+    for idx, line in enumerate(notes):
+        p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+        p.text = line
+        p.font.size = Pt(18)
+        p.font.color.rgb = TEXT if idx == 0 else SUBTEXT
+        p.space_after = Pt(8)
+
+
 def add_metrics_slide(prs: Presentation) -> None:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     set_bg(slide)
@@ -372,6 +451,7 @@ def build_presentation() -> Path:
             "확장 방향: 업로드 문서 QA, 다중 문서 비교, QLoRA 기반 응답 품질 향상",
         ],
     )
+    add_rag_pipeline_slide(prs)
     add_two_column_slide(
         prs,
         "현재까지 구현된 핵심 기능",

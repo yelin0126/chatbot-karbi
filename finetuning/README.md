@@ -132,6 +132,60 @@ python finetuning/train.py \
   --output finetuning/output/qwen25-qlora-v1
 ```
 
+## Compare Base vs Adapter
+
+After training an adapter, compare the base model and the adapter on the
+same question:
+
+```bash
+python finetuning/infer_compare.py \
+  --question "런케이션 프로그램의 지원조건은 무엇인가요?" \
+  --context-file /tmp/context.txt \
+  --adapter finetuning/output/qwen25-qlora-v1
+```
+
+Notes:
+
+- `--context-file` should contain retrieved context in the same `[Doc: ...]`
+  format used by the live RAG system
+- if `run_config.json` exists in the adapter directory, the script will reuse
+  the recorded base model automatically
+- add `--fp16` on modest GPUs if needed
+
+## Safe First Run
+
+For a conservative first launch on a modest local GPU, use:
+
+```bash
+bash finetuning/run_first_qlora.sh
+```
+
+This preset keeps the run safer by:
+
+- using 4-bit loading by default
+- reducing `--max-seq-len` to `1024`
+- using `--batch-size 1`
+- using `--grad-accum 8`
+- using `--fp16` instead of assuming bf16 support
+- using only `2` epochs for the first pass
+- enabling `PYTORCH_ALLOC_CONF=expandable_segments:True`
+
+Before running the first real training job on a 12GB-class GPU, stop:
+
+- `uvicorn`
+- `ollama serve`
+- any other Python or GPU-heavy process
+
+If you only want to validate formatting and dataset split without loading model
+weights, run:
+
+```bash
+python finetuning/train.py \
+  --data finetuning/data/qlora_train_v1.jsonl \
+  --output /tmp/tilon-qlora-dryrun \
+  --dry-run
+```
+
 Important:
 
 - the current dataset is still very small, so this script is a workflow scaffold, not a final training recipe
