@@ -402,12 +402,36 @@ def _contains_chinese(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
 
+def _contains_excessive_english(text: str) -> bool:
+    """True when the response contains ≥ 10 consecutive ASCII-only words.
+
+    This detects English sentences/paragraphs (code-switching) while tolerating
+    legitimate English proper nouns like 'Seventh-day Adventists', 'NEWSTART',
+    or 'General Conference' that naturally appear in Korean theological text.
+    Hyphens, slashes, and common punctuation are treated as separators so
+    hyphenated terms like 'Seventh-day' count as two words, not one long run.
+    """
+    run = 0
+    for token in re.split(r"[\s\-_/,.;:!?()\[\]\"\']+", text or ""):
+        if token and re.fullmatch(r"[A-Za-z]+", token):
+            run += 1
+            if run >= 10:
+                return True
+        elif token:  # non-empty non-ASCII token resets the consecutive run
+            run = 0
+    return False
+
+
 def _needs_language_retry(user_message: str, answer: str) -> bool:
-    """Retry if the model drifted into Chinese despite explicit instructions."""
+    """Retry when the model drifted into Chinese OR into excessive English for a Korean query."""
     target_lang = _infer_target_language(user_message)
     if target_lang not in {"ko", "en"}:
         return False
-    return _contains_chinese(answer)
+    if _contains_chinese(answer):
+        return True
+    if target_lang == "ko" and _contains_excessive_english(answer):
+        return True
+    return False
 
 
 def _language_correction_prompt(
@@ -1131,8 +1155,8 @@ def _merge_chapter_maps(toc_map: Dict[int, str], body_map: Dict[int, str]) -> Di
 # ── Bucket 1: publication history lookup ────────────────────────────────────
 
 _HISTORY_INDICATORS = [
-    "신조", "교리", "추가", "결의", "출간", "출판", "대총회", "한국어",
-    "번역", "개정", "교회연감", "항목", "몇 개", "제목", "명칭",
+    "추가", "결의", "출간", "출판", "한국어",
+    "번역", "개정", "항목", "몇 개", "제목", "명칭",
 ]
 
 
@@ -1172,56 +1196,6 @@ def _parse_publication_history_from_docs(docs) -> Dict[str, List[str]]:
     return result
 
 
-def _extract_publication_history_facts(docs) -> Dict[str, Dict[str, str]]:
-    """Extract normalized publication-history facts from front-matter text."""
-    text = _front_matter_text(docs, max_page=15)
-    facts: Dict[str, Dict[str, str]] = {}
-
-    if re.search(r"1872년[^.]{0,120}?25개의\s*신조", text):
-        location = "베틀크릭" if "베틀크릭" in text else ""
-        facts["1872"] = {
-            "answer": f"1872년에는 {location + '에서 ' if location else ''}25개의 신조가 출간되었습니다.",
-        }
-
-    if re.search(r"28개\s*항목[^.]{0,120}?1889년판\s*교회연감", text):
-        facts["1889"] = {
-            "answer": "1889년판 교회연감에는 28개 항목으로 게재되었다고 설명합니다.",
-        }
-
-    if re.search(r"22개의\s*기본교리[^.]{0,120}?1931년판\s*교회연감", text):
-        facts["1931"] = {
-            "answer": "1931년에는 22개의 기본교리로 정리되어 교회연감에 소개되었다고 설명합니다.",
-        }
-
-    if re.search(r"1980년\s*대총회[^.]{0,120}?27개의\s*항목", text):
-        facts["1980"] = {
-            "answer": "1980년 대총회 회기 때는 27개의 항목으로 다시 정리되었다고 설명합니다.",
-        }
-
-    m_1989 = re.search(
-        r"1989년\s*[\"“']([^\"”']*기본교리\s*27)[\"”']이라는\s*제목으로\s*번역\s*출판",
-        text,
-    )
-    if m_1989:
-        title = re.sub(r"\s+", " ", m_1989.group(1)).strip()
-        facts["1989"] = {
-            "answer": f"1989년에 처음 번역된 한국어판 제목은 「{title}」입니다.",
-        }
-
-    m_2005 = re.search(
-        r"11장의\s*[\"“']([^\"”']*그리스도\s*안에서\s*자라\s*남[^\"”']*)[\"”']이라는\s*항목이\s*추가",
-        text,
-    )
-    if "2005년" in text and m_2005:
-        title = re.sub(r"\s+", " ", m_2005.group(1)).strip()
-        title = re.sub(r"자라\s+남", "자라남", title)
-        facts["2005"] = {
-            "answer": f"2005년 대총회에서 추가된 교리는 제11장 「{title}」입니다.",
-        }
-
-    return facts
-
-
 def _try_history_lookup(user_message: str, docs) -> Optional[str]:
     """Deterministically answer publication-history questions.
 
@@ -1236,12 +1210,6 @@ def _try_history_lookup(user_message: str, docs) -> Optional[str]:
         return None
 
     year = year_m.group(1)
-    facts = _extract_publication_history_facts(docs)
-    if year in facts:
-        answer = facts[year]["answer"]
-        korean = bool(re.search(r"[가-힣]", user_message))
-        return answer if korean else f"According to the document, {answer}"
-
     history = _parse_publication_history_from_docs(docs)
     sentences = history.get(year, [])
     if not sentences:
@@ -1257,130 +1225,6 @@ def _try_history_lookup(user_message: str, docs) -> Optional[str]:
     korean = bool(re.search(r"[가-힣]", user_message))
     return f"문서에 따르면, {best}" if korean else f"According to the document: {best}"
 
-
-# ── Bucket 3: TOC category / structure lookup ────────────────────────────────
-
-_STRUCTURE_INDICATORS = [
-    "구성", "범주", "분류", "목차", "차례", "신론", "인간론", "구원론",
-    "교회론", "그리스도인 생활론", "종말론", "어디서 시작", "몇 장부터",
-]
-
-_CATEGORY_LABEL_RE = re.compile(
-    r"^(?:\|)?\s*(신론|인간론|구원론|교회론|그리스도인\s*생활론|종말론)\s*(?:\|)?$"
-)
-
-
-def _parse_toc_categories_from_docs(docs) -> Dict[str, Tuple[int, int]]:
-    """Parse |카테고리| headers from TOC pages and map each to its chapter range.
-
-    Returns {category_name: (first_chapter_no, last_chapter_no)}.
-    """
-    # Collect ordered (category | visible chapter_no) events from TOC pages.
-    # Category headers may appear either as |신론| or bare labels like 종말론.
-    events: List[Tuple[str, Any]] = []
-    for doc in sorted(
-        docs,
-        key=lambda d: (int(d.metadata.get("page") or 0), int(d.metadata.get("chunk_index") or 0)),
-    ):
-        if int(doc.metadata.get("page") or 0) > 20:
-            break
-        text = _strip_enrichment_header(doc.page_content)
-        for line in re.sub(r"[ \t　]+", " ", text).split("\n"):
-            line = line.strip()
-            cat_m = _CATEGORY_LABEL_RE.match(line)
-            if cat_m:
-                events.append(("cat", re.sub(r"\s+", "", cat_m.group(1))))
-            ch_m = re.search(r"제\s*[\[\(]?\s*(\d{1,3})\s*장", line)
-            if ch_m:
-                events.append(("ch", int(ch_m.group(1))))
-
-    # Group chapters under each category
-    cat_chapters: Dict[str, List[int]] = {}
-    current_cat: Optional[str] = None
-    for kind, val in events:
-        if kind == "cat":
-            current_cat = val
-            cat_chapters.setdefault(current_cat, [])
-        elif kind == "ch" and current_cat:
-            cat_chapters[current_cat].append(val)
-
-    merged_map = _merge_chapter_maps(_parse_toc_from_docs(docs), _parse_body_chapter_map_from_docs(docs))
-    known_chapters = sorted(merged_map)
-
-    # Build ranges from ordered category blocks.
-    # first = previous last + 1 (contiguous chapter blocks)
-    # last  = either:
-    #   - next visible category chapter - 1, when the current category shows OCR gaps
-    #   - current visible max, when the current category looks complete already
-    # This keeps 신론 1-5, 인간론 6-7, 구원론 8-11, 교회론 12-18, 생활론 19-23.
-    cat_names = [c for c in cat_chapters if cat_chapters[c]]
-    result: Dict[str, Tuple[int, int]] = {}
-    prev_last = 0
-    for idx, cat in enumerate(cat_names):
-        chapters = sorted(set(cat_chapters[cat]))
-        first = prev_last + 1 if prev_last > 0 else min(chapters)
-
-        if idx + 1 < len(cat_names):
-            next_visible = min(cat_chapters[cat_names[idx + 1]])
-            consecutive = chapters == list(range(min(chapters), max(chapters) + 1))
-            if len(chapters) == 1 or consecutive:
-                last = max(chapters)
-            else:
-                last = next_visible - 1
-        else:
-            later_known = [n for n in known_chapters if n >= first]
-            last = max(later_known) if later_known else max(chapters)
-
-        if last < first:
-            last = max(chapters)
-        result[cat] = (first, last)
-        prev_last = last
-
-    return result
-
-
-def _try_structure_lookup(user_message: str, docs) -> Optional[str]:
-    """Deterministically answer structural/category questions.
-
-    Handles:
-      "차례를 기준으로 큰 구성 범주" → list all categories with chapter ranges
-      "신론은 어디서 시작합니까?" → 신론 starts at chapter 1
-      "구원론에는 몇 장이 있습니까?" → 구원론 chapter range
-    """
-    if not any(kw in user_message for kw in _STRUCTURE_INDICATORS):
-        return None
-
-    categories = _parse_toc_categories_from_docs(docs)
-    if not categories:
-        return None
-
-    normalized_user = re.sub(r"\s+", "", user_message)
-
-    # Restore internal spaces stripped during key normalisation (e.g. 그리스도인생활론 → 그리스도인 생활론)
-    _DISPLAY = {"그리스도인생활론": "그리스도인 생활론"}
-
-    # Match a specific category name in the query
-    for cat, (first, last) in categories.items():
-        if cat in normalized_user:
-            disp = _DISPLAY.get(cat, cat)
-            count = last - first + 1
-            if "몇 장부터 몇 장까지" in user_message:
-                return f"「{disp}」는 제{first}장부터 제{last}장까지입니다."
-            if any(kw in user_message for kw in ("시작", "몇 장부터", "처음")):
-                return f"「{disp}」는 제{first}장부터 시작합니다."
-            if any(kw in user_message for kw in ("끝", "마지막")):
-                return f"「{disp}」는 제{last}장까지입니다."
-            if any(kw in user_message for kw in ("몇 개", "몇개", "몇 장", "개수")):
-                return f"「{disp}」에는 제{first}장부터 제{last}장까지 총 {count}개의 장이 있습니다."
-            return f"「{disp}」는 제{first}장부터 제{last}장까지입니다."
-
-    # Overview query: list all categories
-    overview_kws = ("구성", "범주", "분류", "목차", "차례", "전체", "큰")
-    if any(kw in user_message for kw in overview_kws):
-        lines = [f"  • {_DISPLAY.get(cat, cat)}: 제{first}장 – 제{last}장" for cat, (first, last) in categories.items()]
-        return "이 문서의 큰 구성 범주는 다음과 같습니다:\n" + "\n".join(lines)
-
-    return None
 
 
 _OUT_OF_SCOPE_TERMS_RE = re.compile(
@@ -2152,9 +1996,6 @@ def handle_chat(
                 # document so the exact article chunk is never missed by top-k.
                 or _needs_article_lookup(user_message)
                 or _should_force_small_doc_full_context(scoped_source, scoped_doc_id)
-                # TOC structure queries (차례, 목차, 신론/구원론/교회론 범주) need
-                # full doc so _try_structure_lookup can parse all TOC pages.
-                or any(kw in user_message for kw in _STRUCTURE_INDICATORS)
             )
         )
         or (
@@ -2376,23 +2217,7 @@ def handle_chat(
                         "active_doc_ids": scoped_doc_ids,
                     }
 
-            direct_structure_answer = _try_structure_lookup(user_message, docs)
-            if direct_structure_answer:
-                logger.info(
-                    "Answered TOC structure lookup directly from '%s'%s",
-                    active_source or "scoped document",
-                    f" ({active_doc_id})" if active_doc_id else "",
-                )
-                return {
-                    "answer": direct_structure_answer,
-                    "sources": extract_sources(docs),
-                    "mode": "document_qa",
-                    "active_source": active_source,
-                    "active_doc_id": active_doc_id,
-                    "active_source_type": active_source_type,
-                    "active_sources": scoped_sources,
-                    "active_doc_ids": scoped_doc_ids,
-                }
+
 
             scoped_docs = _filter_docs_to_named_scope(user_message, docs)
             if len(scoped_docs) != len(docs):
@@ -2541,11 +2366,25 @@ def handle_chat(
     answer = generate_text(prompt, model=selected_model, messages=lm_messages)
 
     if _needs_language_retry(user_message, answer):
-        logger.warning("Language drift detected; retrying answer generation without Chinese output")
-        retry_prompt = _language_correction_prompt(prompt, user_message, answer)
-        # For the retry keep the same system instructions; append the correction
-        # note and the bad draft to the user turn so the model has full context.
+        _is_chinese = _contains_chinese(answer)
         lang_name = "Korean" if _infer_target_language(user_message) == "ko" else "English"
+        if _is_chinese:
+            logger.warning("Language drift detected (Chinese); retrying answer generation")
+            correction_note = (
+                "The previous draft answer was invalid because it used Chinese characters.\n"
+                f"Rewrite the final answer entirely in {lang_name}.\n"
+                "Do not use any Chinese characters.\n"
+            )
+        else:
+            logger.warning("Language drift detected (English code-switching); retrying answer generation")
+            correction_note = (
+                "The previous draft answer is invalid because it contains large English "
+                "paragraphs in what must be an entirely Korean response.\n"
+                "Rewrite the final answer entirely in Korean.\n"
+                "English proper nouns (e.g. 'Seventh-day Adventists', 'NEWSTART') are "
+                "acceptable only when immediately followed by a Korean equivalent in parentheses.\n"
+            )
+        retry_prompt = _language_correction_prompt(prompt, user_message, answer)
         retry_messages: List[Dict[str, Any]] = [
             lm_messages[0],
             {
@@ -2553,9 +2392,7 @@ def handle_chat(
                 "content": (
                     lm_messages[1]["content"]
                     + "\n\n[Critical correction]\n"
-                    + "The previous draft answer was invalid because it used Chinese characters.\n"
-                    + f"Rewrite the final answer entirely in {lang_name}.\n"
-                    + "Do not use any Chinese characters.\n"
+                    + correction_note
                     + "Keep the same facts and stay grounded in the provided context.\n\n"
                     + f"[Invalid draft answer]\n{answer}"
                 ),

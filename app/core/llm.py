@@ -143,13 +143,20 @@ def _build_local_generation_config(model, tokenizer, temperature: Optional[float
 
     generation_config = copy.deepcopy(model.generation_config)
     generation_config.max_new_tokens = max_tokens or LLM_MAX_TOKENS
-    generation_config.do_sample = (temperature if temperature is not None else LLM_TEMPERATURE) > 0
-    generation_config.repetition_penalty = 1.15
-    generation_config.no_repeat_ngram_size = 5
+    _eff_temp = temperature if temperature is not None else LLM_TEMPERATURE
+    generation_config.do_sample = _eff_temp > 0
+    # For greedy decoding (temp=0) use minimal repetition controls so the model
+    # won't substitute correct Korean syllables with alternatives to avoid repeats.
+    if _eff_temp == 0:
+        generation_config.repetition_penalty = 1.05
+        generation_config.no_repeat_ngram_size = 3
+    else:
+        generation_config.repetition_penalty = 1.15
+        generation_config.no_repeat_ngram_size = 5
     generation_config.pad_token_id = tokenizer.pad_token_id
     generation_config.eos_token_id = tokenizer.eos_token_id
     if generation_config.do_sample:
-        generation_config.temperature = temperature if temperature is not None else LLM_TEMPERATURE
+        generation_config.temperature = _eff_temp
         generation_config.top_p = 1.0
     else:
         generation_config.temperature = None
@@ -157,17 +164,22 @@ def _build_local_generation_config(model, tokenizer, temperature: Optional[float
         if hasattr(generation_config, "top_k"):
             generation_config.top_k = None
 
-    # Suppress Chinese character tokens to prevent language drift.
+    # Suppress foreign-script tokens that must never appear in Korean output:
+    # CJK (Chinese/Japanese), Cyrillic (Russian etc.), and Thai characters.
     # Builds the list once and caches it for all subsequent calls.
     if _CJK_BAD_TOKEN_IDS is None:
         bad_ids = []
         for token_id in range(tokenizer.vocab_size):
             decoded = tokenizer.decode([token_id])
-            # CJK Unified Ideographs (U+4E00–U+9FFF) — main Chinese char block
-            if any("\u4e00" <= ch <= "\u9fff" for ch in decoded):
+            if any(
+                "\u4e00" <= ch <= "\u9fff"  # CJK Unified Ideographs
+                or "\u0400" <= ch <= "\u04ff"  # Cyrillic (Russian/Ukrainian/etc.)
+                or "\u0e00" <= ch <= "\u0e7f"  # Thai
+                for ch in decoded
+            ):
                 bad_ids.append(token_id)
         _CJK_BAD_TOKEN_IDS = bad_ids
-        logger.info("Built CJK suppression list: %d token IDs banned", len(bad_ids))
+        logger.info("Built foreign-script suppression list (CJK+Cyrillic+Thai): %d token IDs banned", len(bad_ids))
 
     if _CJK_BAD_TOKEN_IDS:
         generation_config.suppress_tokens = _CJK_BAD_TOKEN_IDS
@@ -292,6 +304,22 @@ def _encode_local_prompt(tokenizer, rendered_prompt: str, max_input_tokens: int)
     return trimmed
 
 
+def _clean_generated_text(text: str) -> str:
+    """
+    Remove stray non-Korean/non-ASCII Unicode symbols that the adapter occasionally
+    emits due to tokenizer pressure from the CJK/Cyrillic/Thai suppression list.
+
+    Intentionally kept minimal and document-agnostic: no domain-specific word
+    corrections, only character-level cleanup of known garbage symbols.
+    """
+    # ㎞ (U+338E, "km" compatibility symbol) is never a valid Korean output character.
+    # The adapter sometimes emits it when forced away from CJK by the suppression list.
+    text = text.replace("㎞", "")
+    # リン (Katakana) and other stray half/full-width Katakana — invalid in Korean output.
+    text = text.replace("リン", "")
+    return text
+
+
 def _generate_local_text(
     prompt: str,
     messages: Optional[List[Dict[str, str]]] = None,
@@ -362,7 +390,7 @@ def _generate_local_text(
         skip_special_tokens=True,
     ).strip()
     del output
-    return answer
+    return _clean_generated_text(answer)
 
 
 def generate_text(
