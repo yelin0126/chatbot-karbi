@@ -12,19 +12,26 @@ This is how ChatGPT/Claude work — retrieve first, let the model decide.
 
 import logging
 import re
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 from app.models.schemas import Message
-from app.core.llm import call_ollama, get_response_text
-from app.retrieval.retriever import retrieve, format_context, extract_sources
+from app.core.llm import generate_text, get_default_model_name
+from app.retrieval.retriever import (
+    retrieve,
+    format_context,
+    format_grouped_corpus_context,
+    extract_sources,
+)
+from app.retrieval.keyword_index import tokenize_text
 from app.core.vectorstore import (
     get_documents_by_source,
     get_documents_by_doc_ids,
     get_document_chunk_count,
+    get_section_titles,
 )
 from app.core.document_registry import list_documents
 from app.config import (
-    OLLAMA_MODEL,
     TAVILY_API_KEY,
     DOCUMENT_CONFIDENCE_THRESHOLD,
     SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD,
@@ -96,7 +103,44 @@ def _needs_full_document_context(text: str) -> bool:
     ]
     if any(keyword in lower for keyword in indicators):
         return True
+    # Count/enumeration queries need the intro/TOC which top-k misses
+    if re.search(r"총\s*몇|몇\s*가지|몇\s*항목|몇\s*개|몇\s*장|how\s+many", lower):
+        return True
     return bool(re.search(r"제\s*\d+\s*조", text))
+
+
+def _needs_multi_document_summary_style(text: str) -> bool:
+    """Detect summary-style requests over multiple documents."""
+    lower = text.lower().strip()
+    indicators = [
+        "요약", "정리", "전체적으로", "전반적으로", "한번에", "묶어서", "파일별",
+        "문서별", "각 문서", "각 파일",
+        "summarize", "summary", "overview", "overall", "together",
+        "by file", "each file", "each document",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _needs_whole_corpus_full_context(text: str) -> bool:
+    """
+    Be much stricter for "all uploaded documents" mode.
+
+    Whole-corpus loading is useful for file-by-file summary style requests, but it is
+    too expensive for ordinary lookup/comparison questions and can cause GPU OOM with
+    the local HF backend.
+    """
+    lower = text.lower().strip()
+    if _needs_multi_document_summary_style(text):
+        return True
+
+    indicators = [
+        "업로드된 문서 전체", "업로드된 전체", "모든 업로드", "전체 업로드",
+        "all uploaded", "entire upload set", "whole upload corpus",
+    ]
+    if any(keyword in lower for keyword in indicators):
+        return True
+    # Count/enumeration questions need the intro section, not random top-k chunks
+    return bool(re.search(r"총\s*몇|몇\s*가지|몇\s*항목|몇\s*개|몇\s*장|how\s+many", lower))
 
 
 def _is_smalltalk_query(text: str) -> bool:
@@ -115,30 +159,54 @@ def _document_not_found_answer(
     active_doc_id: Optional[str] = None,
 ) -> str:
     """Return a grounded fallback when scoped retrieval confidence is too low."""
-    source_name = active_source or active_doc_id or "the uploaded document"
     if re.search(r"[가-힣]", user_message):
-        return (
-            f"업로드된 문서 '{source_name}'에서 질문과 관련된 정보를 찾지 못했습니다. "
-            "질문을 조금 더 구체적으로 해주세요."
-        )
-    return (
-        f"I couldn't find relevant information in the uploaded document '{source_name}'. "
-        "Please try a more specific question."
-    )
+        return "해당 질문에는 답변할 수 없습니다."
+    return "I can't answer that question based on the provided documents."
 
 
 def _document_corpus_not_found_answer(user_message: str, source_type: Optional[str]) -> str:
     """Return a grounded fallback for scoped corpus search such as all uploads."""
-    scope_name = "uploaded documents" if source_type == "upload" else "selected documents"
     if re.search(r"[가-힣]", user_message):
-        return (
-            f"{'업로드된 문서들' if source_type == 'upload' else '선택된 문서들'}에서 "
-            "질문과 관련된 정보를 찾지 못했습니다. 질문을 조금 더 구체적으로 해주세요."
-        )
-    return (
-        f"I couldn't find relevant information in the {scope_name}. "
-        "Please try a more specific question."
-    )
+        return "해당 질문에는 답변할 수 없습니다."
+    return "I can't answer that question based on the provided documents."
+
+
+def _looks_like_question(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    if not lower:
+        return False
+    if "?" in lower or "？" in lower:
+        return True
+    question_markers = [
+        "무엇", "뭐", "누구", "언제", "어디", "왜", "어떻게", "몇", "어느", "있나요",
+        "입니까", "인가요", "설명", "말해줘", "알려줘",
+        "what", "who", "when", "where", "why", "how", "which", "is there", "tell me",
+    ]
+    return any(marker in lower for marker in question_markers)
+
+
+def _split_multi_questions(text: str) -> List[str]:
+    """Split a single user turn into multiple question-like subqueries conservatively."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    pieces: List[str] = []
+    for line in [part.strip() for part in re.split(r"[\r\n]+", raw) if part.strip()]:
+        segments = [segment.strip() for segment in re.split(r"(?<=[?？])\s+", line) if segment.strip()]
+        if segments:
+            pieces.extend(segments)
+
+    normalized: List[str] = []
+    seen = set()
+    for piece in pieces:
+        key = re.sub(r"\s+", " ", piece)
+        if len(key) < 4 or key in seen or not _looks_like_question(key):
+            continue
+        seen.add(key)
+        normalized.append(key)
+
+    return normalized if len(normalized) >= 2 else []
 
 
 def _looks_like_entity_explanation_query(text: str) -> bool:
@@ -251,6 +319,73 @@ def _normalize_active_scopes(
         sources.insert(0, active_source)
 
     return sources, doc_ids
+
+
+def _extract_source_match_tokens(source: str) -> List[str]:
+    stem = Path(source or "").stem
+    raw_parts = re.split(r"[_\-\s()]+", stem)
+    tokens: List[str] = []
+    for part in raw_parts:
+        normalized = _normalize_scope_text(part)
+        if len(normalized) >= 2:
+            tokens.append(normalized)
+    return tokens
+
+
+def _resolve_upload_doc_from_query(user_message: str) -> Optional[Dict[str, str]]:
+    """
+    If the user naturally names one uploaded file in the question, auto-scope to it.
+
+    Example:
+      "제칠일안식일예수재림교의 기본교리는 총 몇 개입니까?"
+    should resolve to:
+      "제칠일안식일예수재림교_기본교리.pdf"
+
+    This makes upload-wide mode behave more like a user-scoped query when the
+    document identity is already present in the text.
+    """
+    normalized_query = _normalize_scope_text(user_message)
+    if len(normalized_query) < 4:
+        return None
+
+    candidates: List[Tuple[Tuple[int, int, int], Dict[str, Any]]] = []
+    for doc in list_documents():
+        if doc.get("source_type") != "upload":
+            continue
+
+        source = str(doc.get("source") or "").strip()
+        if not source:
+            continue
+
+        source_stem = _normalize_scope_text(Path(source).stem)
+        match_tokens = [
+            token for token in _extract_source_match_tokens(source)
+            if token and token in normalized_query
+        ]
+
+        full_stem_match = bool(source_stem and source_stem in normalized_query)
+        if not full_stem_match and len(match_tokens) < 2:
+            continue
+
+        score = (
+            1 if full_stem_match else 0,
+            len(match_tokens),
+            max((len(token) for token in match_tokens), default=0),
+        )
+        candidates.append((score, doc))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_doc = candidates[0]
+    if len(candidates) > 1 and candidates[1][0] == best_score:
+        return None
+
+    return {
+        "source": str(best_doc.get("source") or ""),
+        "doc_id": str(best_doc.get("doc_id") or ""),
+    }
 
 
 def _infer_target_language(text: str) -> str:
@@ -440,9 +575,454 @@ def _needs_comparison_style(text: str) -> bool:
     return any(keyword in lower for keyword in indicators)
 
 
+def _needs_strict_fact_style(text: str) -> bool:
+    """Detect exact-lookup questions where numbers/titles/dates must stay literal."""
+    lower = text.lower().strip()
+    indicators = [
+        "몇 개", "몇장", "몇 장", "총 몇", "몇 항", "몇 조", "언제", "연도", "년도", "제목",
+        "명칭", "이름", "처음", "최초", "어디", "장소", "추가된", "추가", "몇 명", "몇인",
+        "what year", "when", "how many", "how much", "which title", "title", "name",
+        "first", "where", "added", "count", "number of",
+    ]
+    return any(keyword in lower for keyword in indicators)
+
+
+_STRICT_FACT_STOP_TOKENS = {
+    "몇", "개", "장", "조", "항", "명", "인", "총", "언제", "연도", "년도", "제목",
+    "명칭", "이름", "처음", "최초", "어디", "장소", "추가", "added", "count",
+    "number", "of", "how", "many", "what", "year", "when", "where", "title", "name",
+    "is", "are", "the",
+}
+
+
+def _normalize_fact_query_tokens(text: str) -> List[str]:
+    tokens: List[str] = []
+    seen = set()
+    for token in tokenize_text(text):
+        candidates = {token}
+        if len(token) >= 3 and re.match(r"[가-힣]+$", token):
+            candidates.add(re.sub(r"[은는이가의를을와과도만로으로에에서께]|입니다|입니까|인가요|인가|인가\??$", "", token))
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if len(candidate) < 2 or candidate in _STRICT_FACT_STOP_TOKENS:
+                continue
+            if candidate not in seen:
+                seen.add(candidate)
+                tokens.append(candidate)
+    return tokens
+
+
+def _is_count_question(text: str) -> bool:
+    lower = (text or "").lower()
+    indicators = ["몇 개", "총 몇", "number of", "how many", "count"]
+    return any(keyword in lower for keyword in indicators)
+
+
+def _looks_like_doctrine_count_query(user_message: str, active_source: Optional[str]) -> bool:
+    lower = (user_message or "").lower()
+    source_lower = (active_source or "").lower()
+    indicators = ["기본교리", "교리", "belief", "beliefs", "doctrine", "doctrines"]
+    return any(term in lower for term in indicators) or any(term in source_lower for term in indicators)
+
+
+def _try_scoped_chapter_count_answer(
+    user_message: str,
+    docs,
+    active_source: Optional[str],
+) -> Optional[str]:
+    """
+    Deterministically answer count questions from explicit chapter numbering.
+
+    Example:
+      제1장 ... 제28장
+    in a table of contents or chapter headings should allow answering
+    "기본교리는 총 몇 개입니까?" without relying on free-form generation.
+    """
+    if not _is_count_question(user_message):
+        return None
+    if not _looks_like_doctrine_count_query(user_message, active_source):
+        return None
+
+    chapter_pages: Dict[int, int] = {}
+    toc_signal = False
+    for doc in docs:
+        text = _strip_enrichment_header(doc.page_content)
+        if not text:
+            continue
+        page = int(doc.metadata.get("page") or 0)
+        compact = re.sub(r"\s+", " ", text)
+        lowered = compact.lower()
+        if any(term in lowered for term in ("contents", "차례")):
+            toc_signal = True
+        for match in re.finditer(r"제\s*(\d+)\s*장", compact):
+            chapter_no = int(match.group(1))
+            if 0 < chapter_no <= 300:
+                chapter_pages[chapter_no] = min(page, chapter_pages.get(chapter_no, page))
+        for match in re.finditer(r"\bchapter\s+(\d+)\b", compact, flags=re.IGNORECASE):
+            chapter_no = int(match.group(1))
+            if 0 < chapter_no <= 300:
+                chapter_pages[chapter_no] = min(page, chapter_pages.get(chapter_no, page))
+
+    if not chapter_pages:
+        return None
+
+    max_chapter = max(chapter_pages)
+    consecutive = sum(1 for i in range(1, max_chapter + 1) if i in chapter_pages)
+    coverage = consecutive / max(max_chapter, 1)
+
+    if max_chapter < 5:
+        return None
+    if 1 not in chapter_pages:
+        return None
+
+    # OCR-heavy contents pages often miss some chapter labels in the middle,
+    # but if the doc clearly shows a table of contents and reaches a high
+    # chapter number, that is still stronger evidence than a stray "기본교리 27"
+    # title mention on an earlier page.
+    if toc_signal:
+        if max_chapter < 20 or len(chapter_pages) < 8:
+            return None
+    elif coverage < 0.75:
+        return None
+
+    if re.search(r"[가-힣]", user_message):
+        page_note = f" 차례 기준으로 문서 {chapter_pages[max_chapter]}페이지에서 제{max_chapter}장까지 확인됩니다." if chapter_pages.get(max_chapter) else ""
+        return f"문서에 따르면 기본교리는 총 {max_chapter}개입니다.{page_note}"
+
+    page_note = (
+        f" The table of contents/chapter structure shows up to Chapter {max_chapter} around page {chapter_pages[max_chapter]}."
+        if chapter_pages.get(max_chapter) else ""
+    )
+    return f"According to the document, there are {max_chapter} core items in total.{page_note}"
+
+
+def _strict_fact_chunk_score(user_message: str, doc) -> float:
+    text = _strip_enrichment_header(doc.page_content)
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    if not normalized:
+        return 0.0
+
+    tokens = _normalize_fact_query_tokens(user_message)
+    score = 0.0
+    for token in tokens:
+        if token in normalized:
+            score += 3.0 if len(token) >= 4 else 1.5
+
+    if _is_count_question(user_message):
+        if re.search(r"\b\d+\s*개\s*항목", normalized):
+            score += 8.0
+        elif re.search(r"\b총\s*\d+\s*개", normalized):
+            score += 7.0
+        elif re.search(r"\b\d+\s*개", normalized) and any(
+            term in normalized for term in ("기본교리", "신조", "belief", "beliefs")
+        ):
+            score += 5.0
+
+    if any(term in user_message for term in ("언제", "연도", "년도", "처음", "최초")):
+        if re.search(r"\b(17|18|19|20)\d{2}\b", normalized):
+            score += 4.0
+
+    if any(term in user_message for term in ("제목", "명칭", "이름", "title", "name")):
+        if "제목" in normalized or "title" in normalized or "“" in text or '"' in text:
+            score += 3.0
+
+    page = int(doc.metadata.get("page") or 0)
+    if 0 < page <= 20:
+        score += 1.0
+
+    return score
+
+
+def _select_strict_fact_docs(user_message: str, docs, front_chunks: int = 2, top_chunks: int = 6):
+    """
+    For huge single-document strict-fact queries, keep front-matter plus the most
+    query-relevant fact-bearing chunks instead of sending the entire document and
+    losing evidence to later context trimming.
+    """
+    if len(docs) <= (front_chunks + top_chunks):
+        return docs
+
+    ordered_docs = sorted(
+        docs,
+        key=lambda d: (
+            int(d.metadata.get("page") or 0),
+            int(d.metadata.get("chunk_index") or 0),
+        ),
+    )
+
+    selected: List[Any] = []
+    seen_keys = set()
+
+    def _doc_key(doc) -> Tuple[Any, Any, Any]:
+        return (
+            doc.metadata.get("doc_id") or doc.metadata.get("source"),
+            int(doc.metadata.get("page") or 0),
+            int(doc.metadata.get("chunk_index") or 0),
+        )
+
+    for doc in ordered_docs[:front_chunks]:
+        key = _doc_key(doc)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            selected.append(doc)
+
+    scored_docs = sorted(
+        ordered_docs,
+        key=lambda d: (
+            _strict_fact_chunk_score(user_message, d),
+            -int(d.metadata.get("page") or 0),
+        ),
+        reverse=True,
+    )
+
+    for doc in scored_docs:
+        if len(selected) >= front_chunks + top_chunks:
+            break
+        key = _doc_key(doc)
+        if key in seen_keys:
+            continue
+        if _strict_fact_chunk_score(user_message, doc) <= 0:
+            continue
+        seen_keys.add(key)
+        selected.append(doc)
+
+    return sorted(
+        selected,
+        key=lambda d: (
+            int(d.metadata.get("page") or 0),
+            int(d.metadata.get("chunk_index") or 0),
+        ),
+    ) or ordered_docs[: front_chunks + top_chunks]
+
+
+def _try_scoped_count_answer(user_message: str, docs, active_source: Optional[str]) -> Optional[str]:
+    """
+    Deterministically answer simple "총 몇 개" style questions when a strong
+    count phrase is present in the scoped document.
+    """
+    if not _is_count_question(user_message):
+        return None
+
+    chapter_answer = _try_scoped_chapter_count_answer(user_message, docs, active_source)
+    if chapter_answer:
+        return chapter_answer
+
+    query_terms = _normalize_fact_query_tokens(user_message)
+    candidates: List[Tuple[float, int, int, str]] = []
+    patterns = [
+        re.compile(r"총\s*(\d+)\s*개"),
+        re.compile(r"(\d+)\s*개\s*항목"),
+        re.compile(r"(\d+)\s*개"),
+    ]
+
+    for doc in docs:
+        text = _strip_enrichment_header(doc.page_content)
+        if not text:
+            continue
+        compact = re.sub(r"\s+", " ", text)
+        lowered = compact.lower()
+        for pattern in patterns:
+            for match in pattern.finditer(compact):
+                number = int(match.group(1))
+                if number <= 0 or number > 500:
+                    continue
+                start = max(0, match.start() - 120)
+                end = min(len(compact), match.end() + 120)
+                window = compact[start:end]
+                window_lower = lowered[start:end]
+
+                score = 0.0
+                if "항목" in window:
+                    score += 6.0
+                if any(term in window_lower for term in ("기본교리", "신조", "belief", "beliefs")):
+                    score += 5.0
+                score += sum(2.0 for token in query_terms if token in window_lower)
+
+                page = int(doc.metadata.get("page") or 0)
+                if 0 < page <= 20:
+                    score += 1.0
+
+                if score >= 8.0:
+                    candidates.append((score, number, page, window.strip()))
+
+    if not candidates:
+        return None
+
+    best_score, best_number, best_page, _ = sorted(
+        candidates,
+        key=lambda item: (item[0], item[1], -item[2]),
+        reverse=True,
+    )[0]
+    if best_score < 8.0:
+        return None
+
+    if re.search(r"[가-힣]", user_message):
+        page_note = f" 문서 {best_page}페이지 기준입니다." if best_page > 0 else ""
+        return f"문서에 따르면 기본교리는 총 {best_number}개입니다.{page_note}"
+
+    page_note = f" This is stated on page {best_page} of the document." if best_page > 0 else ""
+    return f"According to the document, there are {best_number} core items in total.{page_note}"
+
+
 def _strip_enrichment_header(text: str) -> str:
     """Remove enrichment header prepended before embedding/retrieval."""
     return re.sub(r'^\[Document:.*?\]\n', '', text or '', flags=re.DOTALL).strip()
+
+
+def _split_sentences(text: str) -> List[str]:
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if not normalized:
+        return []
+    parts = re.split(r"(?<=[.!?。])\s+|(?<=다\.)\s+|(?<=요\.)\s+|\n+", normalized)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _sentence_quality_score(text: str) -> float:
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if not normalized:
+        return 0.0
+
+    good_chars = sum(
+        1
+        for ch in normalized
+        if ch.isalnum() or ch.isspace() or ch in ".,:;!?()[]-/%'\"·"
+    )
+    hangul_or_alpha = sum(
+        1
+        for ch in normalized
+        if re.match(r"[A-Za-z가-힣]", ch)
+    )
+    return (good_chars / max(len(normalized), 1)) * 0.5 + (hangul_or_alpha / max(len(normalized), 1)) * 0.5
+
+
+def _clean_ocr_sentence(text: str) -> str:
+    """
+    Clean obvious OCR/document-header noise conservatively.
+
+    Important: if cleaning becomes too destructive, keep the original content.
+    """
+    original = re.sub(r"\s+", " ", (text or "")).strip()
+    if not original:
+        return ""
+
+    cleaned = original
+    cleaned = re.sub(r"^[\s<>\[\]\(\)\-_=+*#~|\\/.,:;]+", "", cleaned)
+    cleaned = re.sub(r"^\d+(?:\s*[.)>-]\s*|\s+)", "", cleaned)
+    cleaned = re.sub(r"^[0-9.\s]+<[^>]{0,80}>\s*", "", cleaned)
+    cleaned = re.sub(r"^(?:제정|개정|시행)\s*\d{4}[./-]\d{1,2}[./-]\d{1,2}\.?\s*", "", cleaned)
+    cleaned = re.sub(r"^(?:규칙\s*제\d+호|제\d+호)\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.")
+
+    if len(cleaned) < 20:
+        return original
+
+    if _sentence_quality_score(cleaned) + 0.08 < _sentence_quality_score(original):
+        return original
+
+    return cleaned
+
+
+def _collect_sections_for_docs(docs, limit: int = 5) -> List[str]:
+    sections: List[str] = []
+    seen = set()
+    for doc in docs:
+        section = str(doc.metadata.get("section_breadcrumb") or doc.metadata.get("section_title") or "").strip()
+        if not section:
+            continue
+        if section in seen:
+            continue
+        seen.add(section)
+        sections.append(section)
+        if len(sections) >= limit:
+            break
+    return sections
+
+
+def _collect_representative_sentences(docs, limit: int = 2) -> List[str]:
+    sentences: List[str] = []
+    seen = set()
+    fallback_sentences: List[str] = []
+    for doc in docs:
+        text = _strip_enrichment_header(doc.page_content)
+        for sentence in _split_sentences(text):
+            original = sentence.strip()
+            if len(original) < 20:
+                continue
+            cleaned = _clean_ocr_sentence(original)
+            candidate = cleaned or original
+            key = re.sub(r"\s+", " ", candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            quality = _sentence_quality_score(candidate)
+            if quality >= 0.55:
+                sentences.append(candidate)
+            else:
+                fallback_sentences.append(candidate)
+            if len(sentences) >= limit:
+                return sentences
+
+    if len(sentences) < limit:
+        for candidate in fallback_sentences:
+            if candidate not in sentences:
+                sentences.append(candidate)
+            if len(sentences) >= limit:
+                break
+
+    return sentences
+
+
+def _build_file_level_corpus_summary(user_message: str, docs) -> str:
+    grouped: Dict[str, List[Any]] = {}
+    order: List[str] = []
+    for doc in docs:
+        source = str(doc.metadata.get("source") or "unknown")
+        if source not in grouped:
+            grouped[source] = []
+            order.append(source)
+        grouped[source].append(doc)
+
+    is_korean = bool(re.search(r"[가-힣]", user_message))
+    lines: List[str] = []
+    if is_korean:
+        lines.append("업로드된 문서별 요약")
+    else:
+        lines.append("Uploaded file summaries")
+
+    for source in order:
+        source_docs = grouped[source]
+        sections = _collect_sections_for_docs(source_docs)
+        sentences = _collect_representative_sentences(source_docs)
+
+        if is_korean:
+            lines.append(f"\n### 파일명: {source}")
+            if sentences:
+                lines.append(f"- 요약: {sentences[0]}")
+            if sections:
+                lines.append(f"- 주요 섹션: {', '.join(sections)}")
+            if len(sentences) > 1:
+                lines.append(f"- 대표 내용: {sentences[1]}")
+        else:
+            lines.append(f"\n### File: {source}")
+            if sentences:
+                lines.append(f"- Summary: {sentences[0]}")
+            if sections:
+                lines.append(f"- Main sections: {', '.join(sections)}")
+            if len(sentences) > 1:
+                lines.append(f"- Representative content: {sentences[1]}")
+
+    if is_korean:
+        lines.append(
+            "\n### 전체 요약(선택 사항)\n"
+            "업로드 문서에는 여러 운영지침·규정·참고자료가 함께 포함되어 있을 수 있으므로, 서로 다른 성격의 문서는 구분해서 해석하는 것이 좋습니다."
+        )
+    else:
+        lines.append(
+            "\n### Overall summary (optional)\n"
+            "The uploaded set may contain a mix of guidelines, regulations, and reference materials, so unrelated files should be interpreted separately."
+        )
+
+    return "\n".join(lines).strip()
 
 
 def _build_direct_extraction_answer(active_source: Optional[str], docs) -> str:
@@ -555,6 +1135,61 @@ CRITICAL RULES:
 7. Be concise and direct. Answer the question first, then explain if needed.
 8. When citing documents, mention the source naturally (e.g., "문서 3페이지에 따르면..." or "According to page 3...")."""
 
+# Compact system prompt for local_hf messages — matches finetuning/train.py
+# DEFAULT_SYSTEM_PROMPT + build_document_system_message rules exactly.
+# Keeps the messages system token count close to training (~200 tokens) so
+# retrieved doc evidence is not evicted by the head/tail trim in llm.py.
+_COMPACT_SYSTEM_PROMPT = (
+    "너는 한국어로 답하는 AI 챗봇이다. "
+    "짧은 질문에는 짧고 자연스럽게 답한다. "
+    "문서 질문은 문서 근거로만 답하고, 근거가 없으면 모른다고 말한다.\n\n"
+    "답변 규칙:\n"
+    "1. CRITICAL: Respond in the SAME language the user is using. "
+    "Korean→Korean, English→English. NEVER respond in Chinese (中文).\n"
+    "2. 제공된 문서 문맥만 근거로 답한다.\n"
+    "3. 문서에 없는 내용은 추측하지 않는다.\n"
+    '4. 문맥이 부족하면 "해당 내용은 제공된 문서에서 확인되지 않습니다."라고 답한다.\n'
+    "5. 핵심 답변을 먼저 말한다.\n"
+    "6. 가능하면 페이지와 문서를 근거로 설명한다.\n"
+    "7. 이미지에서 추출된 텍스트가 제공되면 해당 텍스트를 기반으로 답한다."
+)
+
+# Character budget for doc context in local_hf messages.
+# 3072 token limit (12 GB GPU) − ~115 compact sys − ~100 question/format − ~200 history
+# = ~2657 tokens for doc evidence.  At ~3.2 chars/token for Korean ≈ 8500 chars.
+# This fits ~7 full 1200-char chunks, covering all VECTOR_TOP_K=6 results with headroom.
+_LOCAL_HF_DOC_CONTEXT_CHAR_LIMIT = 8500
+
+
+def _trim_doc_context_for_local_hf(doc_context: str) -> str:
+    """Trim retrieved doc context by dropping trailing chunk blocks to stay within
+    the local_hf token budget.
+
+    Preserves complete [Doc: ...] header + content blocks so the LLM never sees a
+    half-chunk.  Drops the lowest-priority (last-ranked) chunks rather than cutting
+    through a chunk at an arbitrary byte boundary.
+    """
+    if not doc_context or len(doc_context) <= _LOCAL_HF_DOC_CONTEXT_CHAR_LIMIT:
+        return doc_context
+
+    blocks = re.split(r'(?=\[Doc: )', doc_context)
+    kept: List[str] = []
+    total = 0
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+        if total + len(stripped) > _LOCAL_HF_DOC_CONTEXT_CHAR_LIMIT and kept:
+            break
+        kept.append(stripped)
+        total += len(stripped)
+
+    trimmed = "\n\n".join(kept)
+    n_dropped = sum(1 for b in blocks if b.strip()) - len(kept)
+    if n_dropped > 0:
+        trimmed += f"\n\n[Note: {n_dropped} lower-ranked chunk(s) omitted to fit context window]"
+    return trimmed
+
 
 def _build_prompt(
     user_message: str,
@@ -563,28 +1198,73 @@ def _build_prompt(
     web_context: str = "",
     system_prompt: str = "",
     selected_doc_count: int = 0,
-) -> str:
-    """Build a single unified prompt with all available context."""
-    parts = [f"[System]\n{system_prompt or _SYSTEM_PROMPT}"]
+    document_scope_count: int = 0,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Build a unified prompt and matching structured messages.
+
+    Returns:
+        (prompt_string, messages) — prompt_string is the flat string used by
+        Ollama; messages is the [system, user] list fed to the local_hf backend
+        via apply_chat_template, matching the system+user split used in
+        finetuning/train.py (render_document_chat).
+    """
+    # ── System-role content (instructions only) ──────────────────────────
+    sys_parts: List[str] = [f"[System]\n{system_prompt or _SYSTEM_PROMPT}"]
     target_lang = _infer_target_language(user_message)
     if target_lang == "ko":
-        parts.append("[Required response language]\nKorean only. Do not use Chinese characters.")
+        sys_parts.append("[Required response language]\nKorean only. Do not use Chinese characters.")
     elif target_lang == "en":
-        parts.append("[Required response language]\nEnglish only. Do not use Chinese characters.")
-        parts.append(
+        sys_parts.append(
+            "[Required response language]\nEnglish only. Do not use Chinese characters.\n"
             "[Cross-language instruction]\n"
             "If the retrieved document evidence is in Korean, translate and explain it in English. "
             "Do not refuse only because the source document is in another language."
         )
     if _needs_section_understanding_style(user_message):
-        parts.append(
+        sys_parts.append(
             "[Task style]\n"
             "Answer as a section-understanding question. "
             "Explain the role, purpose, differences, or kinds of support described in the document. "
             "Name concrete items from the evidence instead of giving only a generic summary."
         )
-    if selected_doc_count > 1 or _needs_comparison_style(user_message):
-        parts.append(
+    if document_scope_count > 1 and _needs_multi_document_summary_style(user_message) and not _needs_comparison_style(user_message):
+        sys_parts.append(
+            "[Multi-document summary instruction]\n"
+            "You are answering a multi-document summary question.\n"
+            "Summarize the retrieved documents file by file before giving any overall theme.\n"
+            "You MUST create exactly one summary block per distinct file in the retrieved context.\n"
+            "You MUST cover every distinct file that appears in the retrieved context.\n"
+            "Use the actual filename or title as the heading for each block.\n"
+            "Do not split one file into multiple headings just because it has several sections or clauses.\n"
+            "Do not repeat the same file under slightly different names.\n"
+            "Keep each file summary short and concrete.\n"
+            "For each file, mention only:\n"
+            "1. what the document is about,\n"
+            "2. the most important points,\n"
+            "3. anything notably different or special.\n"
+            "Do not merge unrelated documents into one topic.\n"
+            "If some documents are unrelated, say that clearly.\n"
+            "Do not invent broad common themes unless multiple documents clearly support them.\n"
+            "Only include a final overall summary if it is genuinely useful.\n"
+            "Prefer this structure.\n"
+            "If the user is writing in Korean:\n"
+            "- 업로드된 문서별 요약:\n"
+            "- 파일명: ...\n"
+            "  - 요약:\n"
+            "  - 핵심 내용:\n"
+            "  - 특이사항:\n"
+            "- 전체 요약(선택 사항):\n"
+            "If the user is writing in English:\n"
+            "- Uploaded file summaries:\n"
+            "- File: ...\n"
+            "  - Summary:\n"
+            "  - Key points:\n"
+            "  - Notable notes:\n"
+            "- Overall summary (optional):\n"
+            "Every point must stay grounded in the retrieved evidence."
+        )
+    elif selected_doc_count > 1 or _needs_comparison_style(user_message):
+        sys_parts.append(
             "[Comparison instruction]\n"
             "You are answering a document-comparison question.\n"
             "Compare only the selected documents in the retrieved document context.\n"
@@ -607,19 +1287,143 @@ def _build_prompt(
             "Every section must stay grounded in the retrieved evidence."
         )
 
+    # ── User-role content (evidence + question) ───────────────────────────
+    usr_parts: List[str] = []
     history_text = _format_history(history)
     if history_text:
-        parts.append(f"[Conversation history]\n{history_text}")
-
+        usr_parts.append(f"[Conversation history]\n{history_text}")
     if doc_context:
-        parts.append(f"[Retrieved document context]\n{doc_context}")
-
+        usr_parts.append(f"[Retrieved document context]\n{doc_context}")
     if web_context:
-        parts.append(f"[Web search results]\n{web_context}")
+        usr_parts.append(f"[Web search results]\n{web_context}")
+    usr_parts.append(f"[User message]\n{user_message}")
 
-    parts.append(f"[User message]\n{user_message}")
+    system_content = "\n\n".join(sys_parts)
+    user_content = "\n\n".join(usr_parts)
 
-    return "\n\n".join(parts)
+    # Flat string for Ollama — full, unchanged
+    prompt = system_content + "\n\n" + user_content
+
+    # ── Compact messages for local_hf ────────────────────────────────────
+    # Use the training-aligned compact system so the model sees the same
+    # instruction format it was fine-tuned on, saving ~400-600 tokens.
+    # Doc context is trimmed to the char budget so evidence chunks are never
+    # silently evicted by the head/tail byte-trim inside _encode_local_prompt.
+    compact_sys_parts: List[str] = [_COMPACT_SYSTEM_PROMPT]
+    if target_lang == "en":
+        compact_sys_parts.append(
+            "If document evidence is in Korean and the question is in English, "
+            "translate and explain the answer in English."
+        )
+    if _needs_section_understanding_style(user_message):
+        compact_sys_parts.append(
+            "Task: Explain the role, purpose, or differences of the described section "
+            "with concrete items from the evidence."
+        )
+    if document_scope_count > 1 and _needs_multi_document_summary_style(user_message) and not _needs_comparison_style(user_message):
+        compact_sys_parts.append(
+            "Task: 파일별로 요약하되 각 파일을 독립적으로 다루고 파일명을 헤딩으로 써라."
+        )
+    elif selected_doc_count > 1 or _needs_comparison_style(user_message):
+        compact_sys_parts.append(
+            "Task: 문서별로 비교하고 각 포인트가 어느 문서에서 나왔는지 명시해라."
+        )
+
+    compact_usr_parts: List[str] = []
+    if history_text:
+        compact_usr_parts.append(f"[Conversation history]\n{history_text}")
+    if doc_context:
+        compact_usr_parts.append(
+            f"[Retrieved document context]\n{_trim_doc_context_for_local_hf(doc_context)}"
+        )
+    if web_context:
+        compact_usr_parts.append(f"[Web search results]\n{web_context}")
+    compact_usr_parts.append(f"[User message]\n{user_message}")
+
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": "\n".join(compact_sys_parts)},
+        {"role": "user",   "content": "\n\n".join(compact_usr_parts)},
+    ]
+    return prompt, messages
+
+
+def _check_upload_wide_doc_ambiguity(user_message: str, docs) -> Optional[str]:
+    """Return a clarification message when upload-wide retrieval hits 2+ distinct files
+    for an ambiguous article/section query.
+
+    When a user asks '제2조 알려줘' or '지원대상이 어떻게 돼?' without scoping to one
+    document, every uploaded guideline file that has a 제2조 or a 지원대상 clause will
+    surface chunks — causing the LLM to mix content from multiple unrelated guidelines.
+    This check fires before the prompt is built and asks the user to name the file.
+    """
+    distinct_sources: List[str] = []
+    seen: set = set()
+    for doc in docs:
+        src = str(doc.metadata.get("source") or "").strip()
+        if src and src not in seen:
+            seen.add(src)
+            distinct_sources.append(src)
+
+    if len(distinct_sources) < 2:
+        return None
+
+    _AMBIGUOUS_UPLOAD_TERMS = [
+        "지원대상", "운영절차", "경과조치", "부칙", "지원사항",
+        "지원조건", "목적", "정의", "시행일", "신청방법", "신청",
+        "지원중단", "의무사항", "의무위반", "성과", "평가",
+    ]
+    is_ambiguous = _needs_article_lookup(user_message) or any(
+        term in user_message for term in _AMBIGUOUS_UPLOAD_TERMS
+    )
+    if not is_ambiguous:
+        return None
+
+    file_items = "\n".join(f"  • {src}" for src in distinct_sources[:4])
+    overflow = f"\n  • … 외 {len(distinct_sources) - 4}개" if len(distinct_sources) > 4 else ""
+
+    if re.search(r"[가-힣]", user_message):
+        return (
+            "업로드된 여러 문서에서 관련 내용이 검색됩니다:\n"
+            f"{file_items}{overflow}\n\n"
+            "어느 문서를 기준으로 답변할지 왼쪽 보관소에서 파일을 선택하거나, "
+            "파일명을 포함해서 다시 질문해 주세요.\n"
+            "예: '런케이션 제2조 알려줘' 또는 '가족회사 지원대상이 어떻게 돼?'"
+        )
+    file_list_en = ", ".join(f"'{s}'" for s in distinct_sources[:3])
+    return (
+        f"Multiple uploaded files match this query: {file_list_en}.\n"
+        "Please select a specific document from the left shelf "
+        "or include the filename in your question.\n"
+        "Example: 'What is Article 2 of the runkeation guideline?'"
+    )
+
+
+def _needs_article_lookup(text: str) -> bool:
+    """Detect specific article/clause lookup queries (제N조, Article N, Section N)."""
+    if re.search(r"제\s*\d+\s*조", text):
+        return True
+    if re.search(r"\b(?:article|section|clause)\s*\d+\b", text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _get_bundled_labels(source: Optional[str], doc_id: Optional[str]) -> List[str]:
+    """Return sub-guideline labels for a scoped document using metadata only (cheap).
+
+    Reuses _extract_scope_labels logic on a lightweight list of fake Documents
+    built from section titles fetched from Chroma without loading chunk content.
+    """
+    if not source and not doc_id:
+        return []
+    try:
+        from langchain_core.documents import Document as _Doc
+        titles = get_section_titles(source=source, doc_id=doc_id)
+        # Wrap as minimal Document objects so _extract_scope_labels can process them
+        mock_docs = [_Doc(page_content="", metadata={"section_title": t}) for t in titles]
+        return _extract_scope_labels(mock_docs)
+    except Exception as exc:
+        logger.debug("Bundled-label check failed: %s", exc)
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -643,7 +1447,7 @@ def handle_chat(
     Args:
         user_message: What the user said
         history: Conversation history
-        model: Which Ollama model to use
+        model: Which runtime model to use
         active_source: Active document filename scope for the current chat, if any
         active_doc_id: Stable document ID scope for the current chat, if any
         active_source_type: Scope to a whole source type such as "upload"
@@ -652,7 +1456,7 @@ def handle_chat(
         system_prompt: Override default system prompt
     """
     history = history or []
-    selected_model = model or OLLAMA_MODEL
+    selected_model = model or get_default_model_name()
     normalized_sources, normalized_doc_ids = _normalize_active_scopes(
         active_source,
         active_doc_id,
@@ -670,8 +1474,63 @@ def handle_chat(
     if not selected_docs and (active_source or active_doc_id):
         selected_docs = [{"source": active_source or "", "doc_id": active_doc_id or ""}]
 
+    # ── Multi-question fan-out ──────────────────────────────────────────────
+    # When the user packs multiple distinct questions into one message
+    # (newline-separated or ?-separated), answer each one individually so
+    # none get silently dropped.  Each sub-question re-enters handle_chat
+    # with the same scope; _split_multi_questions returns [] for single
+    # questions so there is no recursion.
+    sub_questions = _split_multi_questions(user_message)
+    if sub_questions:
+        sub_results = []
+        for q in sub_questions:
+            sub = handle_chat(
+                user_message=q,
+                history=history,
+                model=model,
+                active_source=active_source,
+                active_doc_id=active_doc_id,
+                active_source_type=active_source_type,
+                active_sources=active_sources,
+                active_doc_ids=active_doc_ids,
+                system_prompt=system_prompt,
+            )
+            sub_results.append((q, sub))
+        combined = "\n\n".join(
+            f"{i}. {sub['answer']}" for i, (_, sub) in enumerate(sub_results, 1)
+        )
+        all_sources: List[Dict] = []
+        seen_src: set = set()
+        for _, sub in sub_results:
+            for s in (sub.get("sources") or []):
+                key = s.get("doc_id") or s.get("source")
+                if key and key not in seen_src:
+                    seen_src.add(key)
+                    all_sources.append(s)
+        last_sub = sub_results[-1][1]
+        return {
+            "answer": combined,
+            "sources": all_sources,
+            "mode": last_sub.get("mode", "document_qa"),
+            "active_source": last_sub.get("active_source"),
+            "active_doc_id": last_sub.get("active_doc_id"),
+            "active_source_type": active_source_type,
+            "active_sources": last_sub.get("active_sources", []),
+            "active_doc_ids": last_sub.get("active_doc_ids", []),
+        }
+
     if _is_smalltalk_query(user_message):
         selected_docs = []
+
+    if not selected_docs and active_source_type == "upload":
+        resolved_doc = _resolve_upload_doc_from_query(user_message)
+        if resolved_doc and (resolved_doc.get("source") or resolved_doc.get("doc_id")):
+            selected_docs = [resolved_doc]
+            logger.info(
+                "Auto-scoped upload-wide query to '%s'%s based on document name in question",
+                resolved_doc.get("source") or "resolved upload",
+                f" ({resolved_doc.get('doc_id')})" if resolved_doc.get("doc_id") else "",
+            )
 
     multi_scope = len(selected_docs) > 1
     scoped_source = selected_docs[0]["source"] if len(selected_docs) == 1 else None
@@ -697,17 +1556,71 @@ def handle_chat(
                 "active_doc_ids": scoped_doc_ids,
             }
 
+    # ── Early bundled-document ambiguity check ──────────────────────────
+    # When exactly one document is scoped and it bundles multiple sub-guidelines
+    # (e.g. a PDF with캡스톤디자인 + 프로젝트Lab + 대학원인턴십 guidelines), an
+    # ambiguous query (제N조, 지원대상, 운영절차, …) without naming a specific
+    # sub-guideline will produce unreliable mixed retrieval results.
+    # We detect this cheaply with a metadata-only scan and ask for clarification
+    # before running any retrieval.
+    if (
+        len(selected_docs) == 1
+        and (scoped_source or scoped_doc_id)
+        and not _is_smalltalk_query(user_message)
+    ):
+        bundled_labels = _get_bundled_labels(scoped_source, scoped_doc_id)
+        if len(bundled_labels) >= 2:
+            normalized_query = _normalize_scope_text(user_message)
+            label_tokens = [_normalize_scope_text(lbl) for lbl in bundled_labels]
+            query_names_specific = any(tok and tok in normalized_query for tok in label_tokens)
+            if not query_names_specific:
+                _AMBIGUOUS_ARTICLE_TERMS = [
+                    "지원대상", "운영절차", "경과조치", "부칙", "지원사항",
+                    "지원중단", "의무위반", "가이드라인 준용", "정의", "목적",
+                    "시행일", "조치", "내용 알려줘",
+                ]
+                is_ambiguous = _needs_article_lookup(user_message) or any(
+                    term in user_message for term in _AMBIGUOUS_ARTICLE_TERMS
+                )
+                if is_ambiguous:
+                    clarification = _build_scoped_ambiguity_answer(user_message, bundled_labels)
+                    logger.info(
+                        "Early bundled-doc clarification: %d sub-guidelines in '%s', query ambiguous",
+                        len(bundled_labels),
+                        scoped_source or scoped_doc_id,
+                    )
+                    return {
+                        "answer": clarification,
+                        "sources": [],
+                        "mode": "document_qa",
+                        "active_source": active_source,
+                        "active_doc_id": active_doc_id,
+                        "active_source_type": active_source_type,
+                        "active_sources": scoped_sources,
+                        "active_doc_ids": scoped_doc_ids,
+                    }
+
     # ── Step 1: Always search for relevant document context ──
     doc_context = ""
     sources = []
 
     use_full_document = bool(
-        multi_scope or (
+        multi_scope
+        or (
             (scoped_source or scoped_doc_id)
             and (
                 _needs_full_document_context(user_message)
+                or _needs_strict_fact_style(user_message)
+                # Article/clause lookups (제N조, Article N) must load the full
+                # document so the exact article chunk is never missed by top-k.
+                or _needs_article_lookup(user_message)
                 or _should_force_small_doc_full_context(scoped_source, scoped_doc_id)
             )
+        )
+        or (
+            active_source_type
+            and not selected_docs
+            and _needs_whole_corpus_full_context(user_message)
         )
     )
 
@@ -718,6 +1631,13 @@ def handle_chat(
             "Loaded %d chunks for multi-document scope across %d selected documents",
             len(docs),
             len(scoped_doc_ids),
+        )
+    elif active_source_type and not selected_docs and use_full_document:
+        docs = get_documents_by_source(source_type=active_source_type)
+        logger.info(
+            "Loaded %d chunks for whole-corpus task from source_type='%s'",
+            len(docs),
+            active_source_type,
         )
     else:
         retrieval = retrieve(
@@ -756,6 +1676,29 @@ def handle_chat(
                 "active_sources": [],
                 "active_doc_ids": [],
             }
+
+        # Upload-wide multi-file ambiguity: chunks retrieved from 2+ different files
+        # for an article/section query that doesn't name a specific file.
+        # Asking now prevents the LLM from mixing content across unrelated guidelines.
+        if docs and active_source_type == "upload":
+            upload_ambiguity = _check_upload_wide_doc_ambiguity(user_message, docs)
+            if upload_ambiguity:
+                n_files = len({d.metadata.get("source") for d in docs if d.metadata.get("source")})
+                logger.info(
+                    "Upload-wide doc ambiguity: %d files match ambiguous query '%s'",
+                    n_files,
+                    user_message[:60],
+                )
+                return {
+                    "answer": upload_ambiguity,
+                    "sources": extract_sources(docs),
+                    "mode": "document_qa",
+                    "active_source": None,
+                    "active_doc_id": None,
+                    "active_source_type": active_source_type,
+                    "active_sources": [],
+                    "active_doc_ids": [],
+                }
 
     if not multi_scope and (scoped_source or scoped_doc_id) and not use_full_document:
         threshold = (
@@ -816,7 +1759,30 @@ def handle_chat(
             }
 
     if docs:
-        if use_full_document and not multi_scope:
+        if use_full_document and not multi_scope and (scoped_source or scoped_doc_id):
+            if _needs_strict_fact_style(user_message):
+                direct_count_answer = _try_scoped_count_answer(
+                    user_message,
+                    docs,
+                    active_source,
+                )
+                if direct_count_answer:
+                    logger.info(
+                        "Answered scoped strict-count query directly from '%s'%s",
+                        active_source or "scoped document",
+                        f" ({active_doc_id})" if active_doc_id else "",
+                    )
+                    return {
+                        "answer": direct_count_answer,
+                        "sources": extract_sources(docs),
+                        "mode": "document_qa",
+                        "active_source": active_source,
+                        "active_doc_id": active_doc_id,
+                        "active_source_type": active_source_type,
+                        "active_sources": scoped_sources,
+                        "active_doc_ids": scoped_doc_ids,
+                    }
+
             scoped_docs = _filter_docs_to_named_scope(user_message, docs)
             if len(scoped_docs) != len(docs):
                 logger.info(
@@ -842,13 +1808,32 @@ def handle_chat(
                     "active_sources": scoped_sources,
                     "active_doc_ids": scoped_doc_ids,
                 }
-        doc_context = format_context(docs)
+            if _needs_strict_fact_style(user_message):
+                narrowed_docs = _select_strict_fact_docs(user_message, docs)
+                if len(narrowed_docs) != len(docs):
+                    logger.info(
+                        "Narrowed strict-fact context from %d to %d chunks for '%s'",
+                        len(docs),
+                        len(narrowed_docs),
+                        scoped_source or "scoped document",
+                    )
+                docs = narrowed_docs
+        if use_full_document and active_source_type and not selected_docs:
+            doc_context = format_grouped_corpus_context(docs)
+        else:
+            doc_context = format_context(docs)
         sources = extract_sources(docs)
         if multi_scope:
             logger.info(
                 "Loaded comparison context: %d chunks from %d selected documents",
                 len(docs),
                 len(scoped_doc_ids),
+            )
+        elif use_full_document and active_source_type and not selected_docs:
+            logger.info(
+                "Loaded full corpus context: %d chunks from source_type='%s'",
+                len(docs),
+                active_source_type,
             )
         elif use_full_document:
             logger.info(
@@ -890,6 +1875,29 @@ def handle_chat(
                 "active_doc_ids": [],
             }
 
+    if (
+        docs
+        and use_full_document
+        and active_source_type
+        and not selected_docs
+        and _needs_multi_document_summary_style(user_message)
+        and not _needs_comparison_style(user_message)
+    ):
+        logger.info(
+            "Returning deterministic whole-corpus file summary for source_type='%s'",
+            active_source_type,
+        )
+        return {
+            "answer": _build_file_level_corpus_summary(user_message, docs),
+            "sources": sources,
+            "mode": "document_qa",
+            "active_source": None,
+            "active_doc_id": None,
+            "active_source_type": active_source_type,
+            "active_sources": [],
+            "active_doc_ids": [],
+        }
+
     # ── Step 2: Check if web search might help ──
     web_context = ""
     if not scoped_source and not multi_scope and _might_need_web_search(user_message):
@@ -899,23 +1907,50 @@ def handle_chat(
             logger.info("Added web search results")
 
     # ── Step 3: Build prompt with all context and let LLM decide ──
-    prompt = _build_prompt(
+    prompt, lm_messages = _build_prompt(
         user_message=user_message,
         history=history,
         doc_context=doc_context,
         web_context=web_context,
         system_prompt=system_prompt,
         selected_doc_count=len(selected_docs),
+        document_scope_count=max(
+            len(selected_docs),
+            len({
+                source.get("doc_id") or source.get("source")
+                for source in sources
+                if source.get("doc_id") or source.get("source")
+            }),
+        ),
     )
 
-    result = call_ollama(prompt, model=selected_model)
-    answer = get_response_text(result)
+    # Pass structured messages to local_hf so apply_chat_template sees the
+    # correct system/user split (matching training format).  Ollama ignores
+    # the messages kwarg and uses the flat prompt string as before.
+    answer = generate_text(prompt, model=selected_model, messages=lm_messages)
 
     if _needs_language_retry(user_message, answer):
         logger.warning("Language drift detected; retrying answer generation without Chinese output")
         retry_prompt = _language_correction_prompt(prompt, user_message, answer)
-        retry_result = call_ollama(retry_prompt, model=selected_model)
-        retry_answer = get_response_text(retry_result)
+        # For the retry keep the same system instructions; append the correction
+        # note and the bad draft to the user turn so the model has full context.
+        lang_name = "Korean" if _infer_target_language(user_message) == "ko" else "English"
+        retry_messages: List[Dict[str, Any]] = [
+            lm_messages[0],
+            {
+                "role": "user",
+                "content": (
+                    lm_messages[1]["content"]
+                    + "\n\n[Critical correction]\n"
+                    + "The previous draft answer was invalid because it used Chinese characters.\n"
+                    + f"Rewrite the final answer entirely in {lang_name}.\n"
+                    + "Do not use any Chinese characters.\n"
+                    + "Keep the same facts and stay grounded in the provided context.\n\n"
+                    + f"[Invalid draft answer]\n{answer}"
+                ),
+            },
+        ]
+        retry_answer = generate_text(retry_prompt, model=selected_model, messages=retry_messages)
         if retry_answer:
             answer = retry_answer
 

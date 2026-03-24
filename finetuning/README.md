@@ -1,121 +1,90 @@
-# Usama's QLoRA Fine-Tuning Workstream
+# QLoRA Fine-Tuning Workstream
 
-This folder contains all fine-tuning work. It is independent of the
-RAG pipeline but uses the same prompt format.
+This folder contains the local fine-tuning and evaluation workflow for improving the answer model used on top of retrieved document context.
 
-System context:
-- Main product overview: [README.md](/home/tilon/chatbot-karbi/README.md)
-- Short backend architecture: [ARCHITECTURE.md](/home/tilon/chatbot-karbi/ARCHITECTURE.md)
+Related docs:
+- [README.md](/home/tilon/chatbot-karbi/README.md)
+- [ARCHITECTURE.md](/home/tilon/chatbot-karbi/ARCHITECTURE.md)
+- [finetuning/data/README.md](/home/tilon/chatbot-karbi/finetuning/data/README.md)
 
-## Key files (to be created)
-- `train.py` — QLoRA training script
-- `evaluate.py` — Model evaluation
-- `data/benchmark_template.jsonl` — Retrieval + answer benchmark seed
-- `data/README.md` — Benchmark schema and workflow
-- `data/qlora_train_v1.jsonl` — First supervised training scaffold linked to benchmark rows
-- `output/` — Trained LoRA adapters
+## Current Status
 
-## Recommended Order
+This workstream is no longer just a scaffold.
 
-Do not start QLoRA first.
+What is working now:
+- local QLoRA training for Qwen2.5 7B
+- strict base-vs-adapter evaluation
+- offline-friendly loading for local model files
+- chat-template-correct training and inference
+- multiple dataset iterations with measured comparisons
 
-Recommended sequence:
-1. build benchmark questions from real Tilon documents
-2. evaluate the current RAG system
-3. tune retrieval / confidence behavior
-4. freeze prompt + context format
-5. then create the QLoRA dataset
+Current best adapter:
+- [qwen25-qlora-v6](/home/tilon/chatbot-karbi/finetuning/output/qwen25-qlora-v6)
+
+Current strongest measured result:
+- eval set: [qlora_eval_ko_strict_v2.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_eval_ko_strict_v2.jsonl)
+- base avg: `0.244`
+- adapter avg: `0.4173`
+- adapter wins: `12/15`
+- base wins: `0/15`
+- ties: `3/15`
+
+Interpretation:
+- QLoRA is helping
+- `v6` is the best current checkpoint
+- more app-level validation is still needed before production defaulting
+
+## Key Files
+
+- [train.py](/home/tilon/chatbot-karbi/finetuning/train.py)
+- [evaluate_adapter.py](/home/tilon/chatbot-karbi/finetuning/evaluate_adapter.py)
+- [infer_compare.py](/home/tilon/chatbot-karbi/finetuning/infer_compare.py)
+- [requirements-qlora.txt](/home/tilon/chatbot-karbi/finetuning/requirements-qlora.txt)
+
+Main datasets:
+- [qlora_train_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v1.jsonl)
+- [qlora_train_v2.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v2.jsonl)
+- [qlora_train_v3.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v3.jsonl)
+- [qlora_train_v4.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v4.jsonl)
+- [qlora_eval_ko_strict_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_eval_ko_strict_v1.jsonl)
+- [qlora_eval_ko_strict_v2.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_eval_ko_strict_v2.jsonl)
+
+## Recommended Workflow
+
+The right sequence is still:
+
+1. stabilize retrieval and prompt/context contract
+2. benchmark the live RAG system
+3. convert high-signal benchmark rows into training data
+4. fine-tune
+5. run strict base-vs-adapter evaluation
+6. test the best adapter inside the real chatbot flow
 
 Why:
-- RAG must provide the right evidence first
-- QLoRA should improve answer behavior on top of stable evidence retrieval
+- retrieval must provide the right evidence first
+- QLoRA should improve evidence usage, not compensate for bad retrieval
 
 ## Training Data Format
 
-Each sample must match the prompt format from `app/chat/prompts.py`:
+Each row uses the live document-QA context style:
 
 ```json
 {
   "id": "qlora-001",
   "source_benchmark_id": "tilon-rise-001",
   "language": "ko",
-  "question": "User's question",
-  "context": "[Doc: filename.pdf | Page: 3 | Section: Requirements | Lang: ko]\nActual chunk text here...",
-  "answer": "Expected high-quality answer with source citation."
+  "question": "사용자 질문",
+  "context": "[Doc: filename.pdf | Page: 3 | Section: Requirements | Lang: ko]\n근거 문맥",
+  "answer": "근거 기반 최종 답변"
 }
 ```
 
-## Critical: The context format MUST match `app/retrieval/retriever.py:format_context()`
+Important:
+- training and inference now use the Qwen chat template, not an ad hoc raw plain-text wrapper
+- context should stay close to live retrieval formatting
+- answers should remain concise and grounded
 
-The starter file `data/qlora_train_v1.jsonl` is a manual scaffold, not a final large training set.
-Its purpose is to:
-
-1. anchor the answer style you want after RAG is stable
-2. preserve difficult benchmark cases such as:
-   - bilingual grounded answers
-   - bundled upload clarification
-   - clean not-found refusals
-3. make later data expansion consistent across teammates
-
-## Validation
-
-Use this to validate the benchmark file:
-
-```bash
-cd /home/tilon/chatbot-karbi
-source .venv/bin/activate
-python scripts/validate_benchmark.py --path finetuning/data/benchmark_template.jsonl
-```
-
-## Run Benchmark
-
-Run the benchmark against the current system:
-
-```bash
-cd /home/tilon/chatbot-karbi
-source .venv/bin/activate
-python scripts/run_benchmark.py --path finetuning/data/benchmark_template.jsonl --mode both
-```
-
-Useful variants:
-
-```bash
-python scripts/run_benchmark.py --mode retrieval
-python scripts/run_benchmark.py --mode answer
-python scripts/run_benchmark.py --id tilon-001 --id tilon-004
-```
-
-Outputs are written to:
-
-- `finetuning/results/benchmark_results_*.jsonl`
-- `finetuning/results/benchmark_summary_*.json`
-
-## Suggested Next Step For QLoRA
-
-After the benchmark baseline is frozen:
-
-1. expand `data/qlora_train_v1.jsonl` from the strongest benchmark rows
-2. keep contexts close to the live retrieved format
-3. prefer high-signal grounded answers over long stylistic responses
-4. include both:
-   - positive grounded answers
-   - clarification / refusal answers
-
-## Training Scaffold
-
-The repo now includes:
-
-- `finetuning/train.py`
-- `finetuning/requirements-qlora.txt`
-
-This script:
-
-1. reads `data/qlora_train_v1.jsonl`
-2. formats each sample to match the current document-QA prompt style
-3. trains a LoRA adapter on top of a frozen base model
-4. saves the adapter and a small `run_config.json`
-
-Install training dependencies first:
+## Install Training Dependencies
 
 ```bash
 cd /home/tilon/chatbot-karbi
@@ -123,70 +92,144 @@ source .venv/bin/activate
 pip install -r finetuning/requirements-qlora.txt
 ```
 
-Example training command:
+## Train An Adapter
+
+Example:
 
 ```bash
 python finetuning/train.py \
-  --data finetuning/data/qlora_train_v1.jsonl \
+  --data finetuning/data/qlora_train_v4.jsonl \
   --model Qwen/Qwen2.5-7B-Instruct \
-  --output finetuning/output/qwen25-qlora-v1
+  --output finetuning/output/qwen25-qlora-v6 \
+  --max-seq-len 640 \
+  --batch-size 1 \
+  --grad-accum 8 \
+  --epochs 2 \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --fp16
 ```
 
-## Compare Base vs Adapter
+Recommended for 12GB-class GPUs:
+- stop `uvicorn`
+- stop `ollama serve`
+- keep `batch_size=1`
+- use `grad_accum=8`
+- use `fp16`
+- use `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 
-After training an adapter, compare the base model and the adapter on the
-same question:
+## Dry Run
+
+Validate dataset formatting and split without loading full model weights:
+
+```bash
+python finetuning/train.py \
+  --data finetuning/data/qlora_train_v4.jsonl \
+  --output /tmp/tilon-qlora-dryrun \
+  --dry-run
+```
+
+## Compare Base vs Adapter On One Prompt
 
 ```bash
 python finetuning/infer_compare.py \
   --question "런케이션 프로그램의 지원조건은 무엇인가요?" \
   --context-file /tmp/context.txt \
-  --adapter finetuning/output/qwen25-qlora-v1
+  --adapter finetuning/output/qwen25-qlora-v6 \
+  --fp16
 ```
 
 Notes:
+- `context.txt` should contain retrieved context in the live `[Doc: ...]` style
+- `run_config.json` is reused automatically if present in the adapter folder
 
-- `--context-file` should contain retrieved context in the same `[Doc: ...]`
-  format used by the live RAG system
-- if `run_config.json` exists in the adapter directory, the script will reuse
-  the recorded base model automatically
-- add `--fp16` on modest GPUs if needed
+## Strict Adapter Evaluation
 
-## Safe First Run
-
-For a conservative first launch on a modest local GPU, use:
+Small strict eval:
 
 ```bash
-bash finetuning/run_first_qlora.sh
+python finetuning/evaluate_adapter.py \
+  --data finetuning/data/qlora_eval_ko_strict_v1.jsonl \
+  --adapter finetuning/output/qwen25-qlora-v6 \
+  --fp16
 ```
 
-This preset keeps the run safer by:
-
-- using 4-bit loading by default
-- reducing `--max-seq-len` to `1024`
-- using `--batch-size 1`
-- using `--grad-accum 8`
-- using `--fp16` instead of assuming bf16 support
-- using only `2` epochs for the first pass
-- enabling `PYTORCH_ALLOC_CONF=expandable_segments:True`
-
-Before running the first real training job on a 12GB-class GPU, stop:
-
-- `uvicorn`
-- `ollama serve`
-- any other Python or GPU-heavy process
-
-If you only want to validate formatting and dataset split without loading model
-weights, run:
+Harder eval:
 
 ```bash
-python finetuning/train.py \
-  --data finetuning/data/qlora_train_v1.jsonl \
-  --output /tmp/tilon-qlora-dryrun \
-  --dry-run
+python finetuning/evaluate_adapter.py \
+  --data finetuning/data/qlora_eval_ko_strict_v2.jsonl \
+  --adapter finetuning/output/qwen25-qlora-v6 \
+  --fp16
 ```
 
-Important:
+Quick smoke test:
 
-- the current dataset is still very small, so this script is a workflow scaffold, not a final training recipe
-- serious QLoRA training should start only after `qlora_train_v1.jsonl` is expanded substantially
+```bash
+python finetuning/evaluate_adapter.py \
+  --data finetuning/data/qlora_eval_ko_strict_v2.jsonl \
+  --adapter finetuning/output/qwen25-qlora-v6 \
+  --fp16 \
+  --limit 2 \
+  --max-new-tokens 96 \
+  --output /tmp/tilon_eval_limit2.json
+```
+
+The evaluator:
+- runs both base and adapter
+- checks answer-type behavior and keyword coverage
+- flags mixed-language drift and repetition
+- writes incremental results
+
+## Current Best Result Summary
+
+### `v3`
+- first clearly useful adapter
+- proved QLoRA could beat base after chat-template correction
+
+### `v4`
+- larger dataset, but did not beat `v3`
+- showed that more data alone was not enough
+
+### `v5`
+- became the strongest focused adapter at that stage
+- improved comparison and not-found behavior
+
+### `v6`
+- current best
+- improved the previously weak comparison case in strict eval v2
+- best candidate for broader product-side testing
+
+## Remaining Weak Spots
+
+Even with `v6`, the workstream is not finished.
+
+Still weak:
+- ambiguous bundled-document clarification
+- nuanced support/benefit comparison answers
+- exact phrase fidelity on strict lookup rows
+- some mention-only wording
+
+## Advanced Fine-Tuning Approaches To Consider
+
+These were postponed until the supervised fine-tuning path was proven. They should now be treated as valid next-stage options.
+
+- failure-driven dataset expansion from strict eval misses
+- judge-assisted hard-case mining
+- targeted synthetic augmentation after real-data coverage is strong
+- preference tuning such as DPO/ORPO for:
+  - clarification
+  - refusal
+  - comparison
+  - mention-only behavior
+- adapter selection or routing by answer type if one adapter does not dominate all cases
+
+## Recommended Next Step
+
+Do not start a new broad training round immediately.
+
+Recommended next move:
+1. freeze `v6` as the current best adapter
+2. test it inside the real chatbot product flow
+3. log real failures
+4. decide whether another targeted dataset round is actually needed

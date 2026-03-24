@@ -208,6 +208,7 @@ def get_documents_by_source(
 
     docs.sort(
         key=lambda doc: (
+            str(doc.metadata.get("source") or ""),
             _sort_value(doc.metadata.get("page")),
             _sort_value(doc.metadata.get("chunk_index")),
         )
@@ -343,6 +344,32 @@ def get_ingested_sources() -> set:
     """
     metadata_list = get_all_metadata()
     return {m.get("source") for m in metadata_list if m and m.get("source")}
+
+
+def get_section_titles(
+    source: Optional[str] = None,
+    doc_id: Optional[str] = None,
+) -> List[str]:
+    """Return distinct section_title values for a scoped document (metadata only).
+
+    Used for lightweight bundled-document detection before retrieval: no chunk
+    content is loaded, only the metadata array is fetched from Chroma.
+    """
+    vs = get_vectorstore()
+    where = _build_where(filter_source=source, filter_doc_id=doc_id)
+    kwargs: Dict[str, Any] = {"include": ["metadatas"]}
+    if where:
+        kwargs["where"] = where
+    store = vs.get(**kwargs)
+    metas = store.get("metadatas", []) or []
+    seen: set = set()
+    titles: List[str] = []
+    for m in metas:
+        title = str(m.get("section_title") or "").strip()
+        if title and title not in seen:
+            seen.add(title)
+            titles.append(title)
+    return titles
 
 
 def get_ingested_doc_ids() -> set:

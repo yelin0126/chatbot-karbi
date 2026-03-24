@@ -15,8 +15,6 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
 from app.config import (
-    OLLAMA_MODEL,
-    AVAILABLE_MODELS,
     DATA_DIR,
     LIBRARY_DIR,
     UPLOADS_DIR,
@@ -30,7 +28,7 @@ from app.models.schemas import (
     CountKeywordRequest,
     SourceInfo,
 )
-from app.core.llm import check_ollama_health
+from app.core.llm import check_llm_health, get_available_models, get_default_model_name
 from app.core.document_registry import clear_document_registry, list_documents, remove_documents
 from app.core.watcher import suppress_watcher_for
 from app.core.vectorstore import (
@@ -56,7 +54,7 @@ def root():
     return {
         "message": "Tilon AI Chatbot API is running",
         "version": "7.0.0",
-        "model": OLLAMA_MODEL,
+        "model": get_default_model_name(),
         "data_dir": str(DATA_DIR),
         "library_dir": str(LIBRARY_DIR),
         "uploads_dir": str(UPLOADS_DIR),
@@ -70,14 +68,16 @@ def root():
 @router.get("/health")
 def health():
     try:
-        ollama_status = check_ollama_health()
+        llm_status = check_llm_health()
         stats = get_collection_stats()
 
         return {
             "status": "ok",
-            "ollama": ollama_status["status"],
-            "model": OLLAMA_MODEL,
-            "available_models": AVAILABLE_MODELS,
+            "ollama": llm_status["status"],
+            "llm_backend": llm_status.get("backend"),
+            "llm_status": llm_status["status"],
+            "model": get_default_model_name(),
+            "available_models": get_available_models(),
             "documents_in_vectorstore": stats["total_chunks"],
             "ocr_enabled": ENABLE_OCR,
         }
@@ -89,10 +89,10 @@ def health():
 
 @router.get("/models")
 def list_models():
-    """Return available Ollama models for the UI model selector."""
+    """Return available runtime models for the UI model selector."""
     return {
-        "default": OLLAMA_MODEL,
-        "available": AVAILABLE_MODELS,
+        "default": get_default_model_name(),
+        "available": get_available_models(),
     }
 
 
@@ -108,7 +108,7 @@ def chat(req: ChatRequest):
         result = handle_chat(
             user_message=req.message,
             history=req.history,
-            model=req.model or OLLAMA_MODEL,
+            model=req.model or get_default_model_name(),
             active_source=req.active_source,
             active_doc_id=req.active_doc_id,
             active_source_type=req.active_source_type,
@@ -118,7 +118,7 @@ def chat(req: ChatRequest):
         )
 
         return ChatResponse(
-            model=req.model or OLLAMA_MODEL,
+            model=req.model or get_default_model_name(),
             answer=result["answer"],
             sources=[SourceInfo(**s) for s in result.get("sources", [])],
             mode=result.get("mode", "general"),
@@ -181,7 +181,7 @@ async def chat_with_file(
 
     if ingest_result["count"] == 0:
         return {
-            "model": OLLAMA_MODEL,
+            "model": get_default_model_name(),
             "answer": f"파일 '{file.filename}'에서 텍스트를 추출하지 못했습니다. "
                       "스캔된 이미지 PDF일 수 있습니다. OCR 설정을 확인해주세요.",
             "sources": [],
@@ -191,7 +191,7 @@ async def chat_with_file(
         }
 
     # Step 3: Answer using the unified handler, scoped to this file
-    selected_model = model or OLLAMA_MODEL
+    selected_model = model or get_default_model_name()
 
     result = handle_chat(
         user_message=message,

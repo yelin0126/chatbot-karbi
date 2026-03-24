@@ -25,6 +25,8 @@ from app.config import (
     UPLOADS_DIR,
     TEMP_DIR,
     OLLAMA_MODEL,
+    LLM_BACKEND,
+    LOCAL_LLM_MODEL_NAME,
     EMBEDDING_MODEL,
     RERANKER_ENABLED,
     RERANKER_MODEL,
@@ -44,7 +46,9 @@ async def lifespan(app: FastAPI):
 
     logger.info("=" * 60)
     logger.info("Tilon AI Chatbot API starting up...")
-    logger.info("  LLM model     : %s", OLLAMA_MODEL)
+    _llm_label = LOCAL_LLM_MODEL_NAME if LLM_BACKEND == "local_hf" else OLLAMA_MODEL
+    _backend_label = f"local_hf ({_llm_label})" if LLM_BACKEND == "local_hf" else f"ollama ({_llm_label})"
+    logger.info("  LLM backend   : %s", _backend_label)
     logger.info("  Embedding     : %s", EMBEDDING_MODEL)
     logger.info("  Reranker      : %s", RERANKER_MODEL if RERANKER_ENABLED else "disabled")
     logger.info("  Data dir      : %s", DATA_DIR)

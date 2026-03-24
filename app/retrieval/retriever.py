@@ -8,6 +8,7 @@ IMPROVEMENTS over original:
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
 
@@ -256,7 +257,6 @@ def format_context(docs: List[Document]) -> str:
     if not docs:
         return ""
 
-    import re
     # Pattern to match enrichment header at start of chunk
     _header_re = re.compile(r'^\[Document:.*?\]\n', re.DOTALL)
 
@@ -275,6 +275,73 @@ def format_context(docs: List[Document]) -> str:
         content = _header_re.sub('', d.page_content).strip()
 
         parts.append(f"{header}\n{content}")
+
+    return "\n\n".join(parts)
+
+
+def format_grouped_corpus_context(
+    docs: List[Document],
+    max_chunks_per_doc: int = 3,
+    max_chars_per_chunk: int = 260,
+) -> str:
+    """
+    Format a multi-document corpus for file-by-file summarization.
+
+    This groups chunks by source and trims very long documents so a single file
+    does not dominate the prompt when the user asks for a corpus-level summary.
+    """
+    if not docs:
+        return ""
+
+    header_re = re.compile(r'^\[Document:.*?\]\n', re.DOTALL)
+    grouped: Dict[str, List[Document]] = {}
+    order: List[str] = []
+    for doc in docs:
+        source = str(doc.metadata.get("source") or "unknown")
+        if source not in grouped:
+            grouped[source] = []
+            order.append(source)
+        grouped[source].append(doc)
+
+    parts: List[str] = []
+    for source in order:
+        source_docs = grouped[source]
+        lang = source_docs[0].metadata.get("language", "unknown")
+        total_chunks = len(source_docs)
+
+        if total_chunks > max_chunks_per_doc:
+            visible_docs = source_docs[: max_chunks_per_doc - 1] + [source_docs[-1]]
+        else:
+            visible_docs = source_docs
+
+        parts.append(
+            f"[File: {source} | Lang: {lang} | Visible chunks: {len(visible_docs)}/{total_chunks}]"
+        )
+        seen_sections = []
+        for doc in visible_docs:
+            page = doc.metadata.get("page", "?")
+            section = doc.metadata.get("section_breadcrumb", "") or doc.metadata.get("section_title", "")
+            content = header_re.sub("", doc.page_content).strip()
+            compact = re.sub(r"\s+", " ", content).strip()
+            if len(compact) > max_chars_per_chunk:
+                compact = compact[: max_chars_per_chunk].rstrip() + "..."
+
+            if section and section not in seen_sections:
+                seen_sections.append(section)
+
+            parts.append(
+                f"- Page: {page} | Section: {section or 'general'} | Evidence: {compact}"
+            )
+
+        if seen_sections:
+            parts.append(
+                f"[Sections observed] {', '.join(seen_sections[:5])}"
+            )
+
+        if total_chunks > len(visible_docs):
+            parts.append(
+                f"[Note] Additional chunks from '{source}' were omitted for brevity."
+            )
 
     return "\n\n".join(parts)
 

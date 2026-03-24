@@ -31,12 +31,24 @@ DOCUMENT_REGISTRY_PATH = Path(
 MARKER_OUTPUT_DIR = BASE_DIR / "marker_output"
 
 # ── Ollama / LLM ──────────────────────────────────────────────────────
+LLM_BACKEND = os.getenv("LLM_BACKEND", "ollama").strip().lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/api")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 AVAILABLE_MODELS = os.getenv(
     "AVAILABLE_MODELS",
     "qwen2.5:7b,llama3.1:latest,llama3.2-vision:11b",
 ).split(",")
+LOCAL_LLM_MODEL_NAME = os.getenv("LOCAL_LLM_MODEL_NAME", "qwen25-qlora-v6")
+LOCAL_LLM_ADAPTER_PATH = os.getenv(
+    "LOCAL_LLM_ADAPTER_PATH",
+    str(BASE_DIR / "finetuning" / "output" / "qwen25-qlora-v6"),
+)
+LOCAL_LLM_BASE_MODEL = os.getenv("LOCAL_LLM_BASE_MODEL", "").strip()
+LOCAL_LLM_LOCAL_FILES_ONLY = os.getenv("LOCAL_LLM_LOCAL_FILES_ONLY", "true").lower() == "true"
+LOCAL_LLM_LOAD_IN_4BIT = os.getenv("LOCAL_LLM_LOAD_IN_4BIT", "true").lower() == "true"
+LOCAL_LLM_MAX_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_MAX_INPUT_TOKENS", "3072"))
+LOCAL_LLM_OOM_RETRY_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_INPUT_TOKENS", "2048"))
+LOCAL_LLM_OOM_RETRY_MAX_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_MAX_TOKENS", "256"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))
@@ -53,6 +65,7 @@ def _detect_device() -> str:
         return "cpu"
 
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", _detect_device())
+LOCAL_LLM_DEVICE = os.getenv("LOCAL_LLM_DEVICE", _detect_device())
 
 # ── Reranker (NEW — not in original) ──────────────────────────────────
 RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "false").lower() == "true"
@@ -69,14 +82,14 @@ RERANKER_USE_FP16 = os.getenv(
 ).lower() == "true"
 
 # ── Retrieval ─────────────────────────────────────────────────────────
-VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "4"))
+VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "6"))
 GLOBAL_MIN_RELEVANCE_SCORE = float(os.getenv("GLOBAL_MIN_RELEVANCE_SCORE", "0.30"))
 DOCUMENT_CONFIDENCE_THRESHOLD = float(os.getenv("DOCUMENT_CONFIDENCE_THRESHOLD", "0.45"))
 SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD = float(
     os.getenv("SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD", "0.30")
 )
 SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS = int(
-    os.getenv("SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS", "6")
+    os.getenv("SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS", "15")
 )
 STRONG_KEYWORD_CONFIDENCE_FLOOR = float(os.getenv("STRONG_KEYWORD_CONFIDENCE_FLOOR", "0.75"))
 

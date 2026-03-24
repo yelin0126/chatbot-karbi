@@ -12,6 +12,22 @@
             --bg2: #ffffff;
             --bg3: #f0f1f3;
             --bgh: #e8eaed;
+            --surface: #ffffff;
+            --surface-soft: #fafbfd;
+            --surface-hover: #fff5f5;
+            --chat-bg-top: #f8fafc;
+            --chat-bg-bottom: #f5f7fb;
+            --assistant-bg: rgba(255, 255, 255, 0.84);
+            --assistant-border: rgba(148, 163, 184, 0.26);
+            --success-bg: #e7f7ef;
+            --success-border: #b7e4c7;
+            --success-text: #166534;
+            --info-bg: #eef2ff;
+            --info-border: #c7d2fe;
+            --info-text: #4338ca;
+            --file-banner-bg: #eef6ff;
+            --file-banner-border: #bfdbfe;
+            --file-banner-text: #1d4ed8;
             --accent: #2563eb;
             --accent2: #3b82f6;
             --tp: #1a1a2e;
@@ -23,6 +39,39 @@
             --user-bg: rgba(37, 99, 235, 0.07);
             --user-border: #2563eb;
             --sw: 280px;
+        }
+
+        body[data-theme="dark"] {
+            --bg: #09111f;
+            --bg2: #111b2d;
+            --bg3: #182437;
+            --bgh: #22314a;
+            --surface: #132032;
+            --surface-soft: #101b2b;
+            --surface-hover: #2b1821;
+            --chat-bg-top: #0d1524;
+            --chat-bg-bottom: #0a1120;
+            --assistant-bg: rgba(19, 32, 50, 0.82);
+            --assistant-border: rgba(96, 165, 250, 0.18);
+            --success-bg: rgba(16, 185, 129, 0.13);
+            --success-border: rgba(52, 211, 153, 0.24);
+            --success-text: #86efac;
+            --info-bg: rgba(96, 165, 250, 0.12);
+            --info-border: rgba(96, 165, 250, 0.22);
+            --info-text: #bfdbfe;
+            --file-banner-bg: rgba(96, 165, 250, 0.12);
+            --file-banner-border: rgba(96, 165, 250, 0.22);
+            --file-banner-text: #bfdbfe;
+            --accent: #60a5fa;
+            --accent2: #3b82f6;
+            --tp: #e2ebf8;
+            --ts: #9fb0c9;
+            --tm: #7386a3;
+            --border: #24324c;
+            --success: #34d399;
+            --danger: #f87171;
+            --user-bg: rgba(96, 165, 250, 0.12);
+            --user-border: #60a5fa;
         }
 
         body {
@@ -229,7 +278,7 @@
         .shelf-tools { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
         .shelf-search {
             width: 100%;
-            background: #fff;
+            background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 6px;
             padding: 7px 10px;
@@ -261,7 +310,7 @@
             overflow-y: auto;
             border: 1px solid var(--border);
             border-radius: 8px;
-            background: #fafbfd;
+            background: var(--surface-soft);
             padding: 6px;
         }
 
@@ -271,7 +320,7 @@
 
         .shelf-item {
             border: 1px solid var(--border);
-            background: #fff;
+            background: var(--surface);
             border-radius: 6px;
             padding: 8px;
             margin-bottom: 6px;
@@ -317,13 +366,13 @@
             padding: 3px 6px;
             border: 1px solid var(--border);
             border-radius: 4px;
-            background: #fff;
+            background: var(--surface);
             color: var(--tm);
             cursor: pointer;
             font-family: inherit;
         }
 
-        .shelf-del-btn:hover { border-color: var(--danger); color: var(--danger); background: #fff5f5; }
+        .shelf-del-btn:hover { border-color: var(--danger); color: var(--danger); background: var(--surface-hover); }
         .shelf-item-meta { margin-top: 4px; font-size: 11px; color: var(--tm); }
         .shelf-item-time { margin-top: 5px; font-size: 10px; color: var(--tm); }
 
@@ -445,6 +494,11 @@
 
         .hdr-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+        .theme-btn {
+            min-width: 90px;
+            justify-content: center;
+        }
+
         .selection-tray {
             display: none;
             align-items: center;
@@ -464,7 +518,7 @@
             max-width: 260px;
             padding: 5px 10px;
             border-radius: 999px;
-            background: #fff;
+            background: var(--surface);
             border: 1px solid rgba(37, 99, 235, 0.18);
             color: var(--accent);
             font-size: 12px;
@@ -501,7 +555,7 @@
             scroll-behavior: smooth;
             background:
                 radial-gradient(circle at top right, rgba(37, 99, 235, 0.05), transparent 28%),
-                linear-gradient(180deg, #f8fafc, #f5f7fb);
+                linear-gradient(180deg, var(--chat-bg-top), var(--chat-bg-bottom));
         }
 
         .messages::-webkit-scrollbar { width: 4px; }
@@ -555,6 +609,14 @@
             word-break: break-word;
         }
 
+        .msg-text:not(.user) {
+            background: var(--assistant-bg);
+            border: 1px solid var(--assistant-border);
+            border-radius: 12px;
+            padding: 12px 14px;
+            box-shadow: 0 10px 26px rgba(2, 6, 23, 0.04);
+        }
+
         .msg-text.user {
             background: var(--user-bg);
             border-left: 3px solid var(--user-border);
@@ -574,9 +636,9 @@
             align-items: center;
             padding: 3px 8px;
             border-radius: 999px;
-            background: #e7f7ef;
-            border: 1px solid #b7e4c7;
-            color: #166534;
+            background: var(--success-bg);
+            border: 1px solid var(--success-border);
+            color: var(--success-text);
             font-size: 11px;
             font-weight: 700;
         }
@@ -586,9 +648,9 @@
             align-items: center;
             padding: 3px 8px;
             border-radius: 999px;
-            background: #eef2ff;
-            border: 1px solid #c7d2fe;
-            color: #4338ca;
+            background: var(--info-bg);
+            border: 1px solid var(--info-border);
+            color: var(--info-text);
             font-size: 11px;
         }
 
@@ -675,9 +737,9 @@
         }
 
         .file-banner {
-            background: #eef6ff;
-            border: 1px solid #bfdbfe;
-            color: #1d4ed8;
+            background: var(--file-banner-bg);
+            border: 1px solid var(--file-banner-border);
+            color: var(--file-banner-text);
         }
 
         .scope-label {
@@ -946,6 +1008,7 @@
             <select class="model-select" id="model-select"></select>
             <span class="header-stat"><span class="header-dot"></span><span id="selected-stat">선택 0</span></span>
             <span class="header-stat"><span class="header-dot" style="background: var(--success)"></span><span id="upload-stat">업로드 0</span></span>
+            <button class="hdr-btn theme-btn" id="theme-toggle" onclick="toggleTheme()">🌙 다크</button>
             <button class="hdr-btn" onclick="openModal('sp-modal')">⚙️ 프롬프트</button>
         </div>
         <div class="selection-tray" id="selection-tray">
@@ -993,6 +1056,7 @@ let currentUser = null;
 let isLoading = false;
 let abortController = null;
 let currentModel = null;
+let currentTheme = localStorage.getItem('ai_theme') || 'light';
 let systemPrompt = localStorage.getItem('ai_sys_prompt') || '당신은 사내 AI 어시스턴트입니다. 한국어로 친절하고 명확하게 답변하세요. 문서 질문은 반드시 제공된 문서 근거로만 답변하세요.';
 let chats = normalizeChats(JSON.parse(localStorage.getItem(CHAT_KEY) || '[]'));
 let uploadedDocs = normalizeDocs(JSON.parse(localStorage.getItem(DOC_KEY) || '[]'));
@@ -1010,6 +1074,22 @@ const selectedStat = document.getElementById('selected-stat');
 const uploadStat = document.getElementById('upload-stat');
 const selectionTray = document.getElementById('selection-tray');
 const selectionChips = document.getElementById('selection-chips');
+const themeToggle = document.getElementById('theme-toggle');
+
+function applyTheme(theme) {
+    currentTheme = theme === 'dark' ? 'dark' : 'light';
+    document.body.setAttribute('data-theme', currentTheme);
+    localStorage.setItem('ai_theme', currentTheme);
+    if (themeToggle) {
+        themeToggle.textContent = currentTheme === 'dark' ? '☀️ 라이트' : '🌙 다크';
+    }
+}
+
+function toggleTheme() {
+    applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+}
+
+applyTheme(currentTheme);
 
 function now() {
     return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });

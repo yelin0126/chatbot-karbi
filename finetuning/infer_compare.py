@@ -11,11 +11,13 @@ Example:
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
-from train import DEFAULT_SYSTEM_PROMPT, build_document_prompt
+from train import DEFAULT_SYSTEM_PROMPT, render_document_chat
 
 
 def _dependency_available(name: str) -> bool:
@@ -66,9 +68,21 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SYSTEM_PROMPT,
         help="System prompt used to build the document-QA prompt.",
     )
-    parser.add_argument("--max-new-tokens", type=int, default=256, help="Generation length.")
+    parser.add_argument("--max-new-tokens", type=int, default=160, help="Generation length.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature.")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p sampling.")
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=1.1,
+        help="Penalty to reduce repetitive decoding.",
+    )
+    parser.add_argument(
+        "--no-repeat-ngram-size",
+        type=int,
+        default=4,
+        help="Prevent repeated n-grams during decoding.",
+    )
     parser.add_argument(
         "--disable-4bit",
         action="store_true",
@@ -110,6 +124,34 @@ def _load_context(args: argparse.Namespace) -> str:
     return str(args.context).strip()
 
 
+def _build_generation_config(model, tokenizer, args):
+    generation_config = copy.deepcopy(model.generation_config)
+    generation_config.max_new_tokens = args.max_new_tokens
+    generation_config.do_sample = args.temperature > 0
+    generation_config.repetition_penalty = args.repetition_penalty
+    generation_config.no_repeat_ngram_size = args.no_repeat_ngram_size
+    generation_config.pad_token_id = tokenizer.pad_token_id
+    generation_config.eos_token_id = tokenizer.eos_token_id
+
+    if generation_config.do_sample:
+        generation_config.temperature = args.temperature
+        generation_config.top_p = args.top_p
+    else:
+        generation_config.temperature = None
+        generation_config.top_p = None
+        if hasattr(generation_config, "top_k"):
+            generation_config.top_k = None
+
+    return generation_config
+
+
+def _adapter_disabled_context(adapter_model):
+    disable_adapter = getattr(adapter_model, "disable_adapter", None)
+    if callable(disable_adapter):
+        return disable_adapter()
+    return nullcontext()
+
+
 def main() -> None:
     args = parse_args()
     _require_inference_dependencies()
@@ -124,15 +166,21 @@ def main() -> None:
 
     base_model_name = _resolve_base_model(adapter_path, args.model)
     context = _load_context(args)
-    prompt = build_document_prompt(
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model_name,
+        use_fast=True,
+        local_files_only=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    prompt = render_document_chat(
+        tokenizer=tokenizer,
         system_prompt=args.system_prompt,
         user_message=args.question.strip(),
         context=context,
+        add_generation_prompt=True,
     )
-
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_fast=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
 
     quant_config = None
     if not args.disable_4bit and _dependency_available("bitsandbytes"):
@@ -153,33 +201,27 @@ def main() -> None:
         model_kwargs["quantization_config"] = quant_config
         model_kwargs["device_map"] = "auto"
 
+    model_kwargs["local_files_only"] = True
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name, **model_kwargs)
     base_model.eval()
+    adapter_model = PeftModel.from_pretrained(base_model, str(adapter_path))
+    adapter_model.eval()
 
     encoded = tokenizer(prompt, return_tensors="pt")
-    encoded = {key: value.to(base_model.device) for key, value in encoded.items()}
+    encoded = {key: value.to(adapter_model.device) for key, value in encoded.items()}
 
-    generation_kwargs = {
-        "max_new_tokens": args.max_new_tokens,
-        "do_sample": args.temperature > 0,
-        "temperature": args.temperature if args.temperature > 0 else None,
-        "top_p": args.top_p if args.temperature > 0 else None,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-    generation_kwargs = {k: v for k, v in generation_kwargs.items() if v is not None}
-
-    with torch.no_grad():
-        base_output = base_model.generate(**encoded, **generation_kwargs)
+    generation_config = _build_generation_config(adapter_model, tokenizer, args)
+    with _adapter_disabled_context(adapter_model):
+        with torch.no_grad():
+            base_output = adapter_model.generate(**encoded, generation_config=generation_config)
     base_text = tokenizer.decode(
         base_output[0][encoded["input_ids"].shape[1]:],
         skip_special_tokens=True,
     ).strip()
 
-    adapter_model = PeftModel.from_pretrained(base_model, str(adapter_path))
-    adapter_model.eval()
+    adapter_generation_config = _build_generation_config(adapter_model, tokenizer, args)
     with torch.no_grad():
-        adapter_output = adapter_model.generate(**encoded, **generation_kwargs)
+        adapter_output = adapter_model.generate(**encoded, generation_config=adapter_generation_config)
     adapter_text = tokenizer.decode(
         adapter_output[0][encoded["input_ids"].shape[1]:],
         skip_special_tokens=True,

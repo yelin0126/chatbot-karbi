@@ -1,43 +1,65 @@
-# Benchmark Dataset
+# Benchmark And Fine-Tuning Datasets
 
-This folder is the starting point for the evaluation benchmark that will guide:
+This folder contains the benchmark, strict evaluation, and supervised fine-tuning datasets used to improve the Tilon chatbot.
 
-1. retrieval tuning
-2. confidence threshold tuning
-3. QLoRA dataset preparation
+## What Lives Here
 
-The benchmark should be built from real Tilon documents, not synthetic toy examples.
+Benchmark and eval files:
+- [benchmark_tilon_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/benchmark_tilon_v1.jsonl)
+- [benchmark_upload_scoped_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/benchmark_upload_scoped_v1.jsonl)
+- [benchmark_compare_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/benchmark_compare_v1.jsonl)
+- [qlora_eval_ko_strict_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_eval_ko_strict_v1.jsonl)
+- [qlora_eval_ko_strict_v2.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_eval_ko_strict_v2.jsonl)
 
-## Why This Exists
+Training sets:
+- [qlora_train_v1.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v1.jsonl)
+- [qlora_train_v2.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v2.jsonl)
+- [qlora_train_v3.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v3.jsonl)
+- [qlora_train_v4.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_train_v4.jsonl)
 
-Right now the project has strong ingestion and retrieval foundations, but it still needs a measurable evaluation loop.
+## Purpose Of Each Dataset Family
 
-Without a benchmark:
-- retrieval tuning becomes guesswork
-- confidence thresholds are hard to calibrate
-- QLoRA quality is hard to compare against the base model
+### Benchmarks
+Used to evaluate live RAG behavior.
+
+They guide:
+- retrieval tuning
+- confidence threshold tuning
+- scoped upload behavior
+- comparison behavior
+
+### Strict eval sets
+Used for base-vs-adapter evaluation.
+
+They focus on:
+- Korean-heavy grounded QA
+- exact lookup
+- clarification
+- not-found refusal
+- mention-only behavior
+- comparison quality
+
+### QLoRA training sets
+Used to train LoRA adapters after the prompt/context contract is stable.
+
+They should teach:
+- concise grounded answering
+- clean refusal
+- ambiguity clarification
+- Korean answer stability
 
 ## Recommended Workflow
 
-### Step 1: Build benchmark questions
-Create JSONL rows in `benchmark_template.jsonl` using representative Tilon documents.
+1. benchmark live RAG first
+2. identify failure patterns
+3. convert high-signal rows into supervised examples
+4. train adapter
+5. evaluate base vs adapter on strict eval sets
+6. validate best adapter inside the actual chatbot flow
 
-### Step 2: Run baseline evaluation
-Evaluate the current RAG system using these questions before changing thresholds or prompts.
+## Benchmark JSONL Schema
 
-### Step 3: Tune retrieval
-Use benchmark failures to improve:
-- retrieval precision
-- confidence gating
-- scoped vs global behavior
-- reranking runtime strategy
-
-### Step 4: Convert benchmark items into QLoRA-ready training data
-Once the prompt/context format is stable, selected benchmark items can become supervised fine-tuning examples.
-
-## JSONL Schema
-
-Each line should be one JSON object like this:
+Each benchmark row looks like:
 
 ```json
 {
@@ -58,8 +80,7 @@ Each line should be one JSON object like this:
 }
 ```
 
-## Required Fields
-
+Required fields:
 - `id`
 - `category`
 - `language`
@@ -68,146 +89,15 @@ Each line should be one JSON object like this:
 - `should_answer_from_docs`
 - `expected_answer_points`
 
-## Optional Scope Fields
-
+Optional scope fields:
 - `scope_source_type`
 - `document_sources`
 
-Use `scope_source_type` when the same filename may exist in more than one registry scope.
+Use `document_sources` for comparison-style rows.
 
-Example:
+## QLoRA Training Schema
 
-```json
-{
-  "document_source": "policy_bundle.pdf",
-  "scope_source_type": "upload"
-}
-```
-
-This is especially useful for upload-scoped benchmarks, where the runner should prefer
-the uploaded document instead of a library copy with the same filename.
-
-Use `document_sources` for multi-document comparison benchmarks.
-
-Example:
-
-```json
-{
-  "document_source": "doc_a.pdf",
-  "document_sources": ["doc_a.pdf", "doc_b.pdf"]
-}
-```
-
-When `document_sources` contains two or more entries, the benchmark runner scopes the
-question to all selected documents and evaluates comparison-style answers.
-
-## Suggested Categories
-
-- `exact_lookup`
-- `summary`
-- `ocr_extract`
-- `section_understanding`
-- `not_found`
-- `bilingual`
-
-## Upload-Scoped Benchmarks
-
-The file `benchmark_upload_scoped_v1.jsonl` is for temporary upload-chat behavior rather than
-the persistent library corpus.
-
-Before running it:
-
-1. start the backend
-2. upload the target file once through `/ui` or `/chat-with-file`
-3. confirm the uploaded filename exists in the document registry
-4. run the benchmark
-
-Example:
-
-```bash
-python scripts/validate_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl
-python scripts/run_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl --mode both
-```
-
-## Comparison Benchmarks
-
-The file `benchmark_compare_v1.jsonl` is for multi-document PDF comparison.
-
-It uses library documents by default, so it can usually be run immediately after normal ingest:
-
-```bash
-python scripts/validate_benchmark.py --path finetuning/data/benchmark_compare_v1.jsonl
-python scripts/run_benchmark.py --path finetuning/data/benchmark_compare_v1.jsonl --mode both
-```
-
-## Category Guidance
-
-### `exact_lookup`
-Use for:
-- commands
-- settings
-- paths
-- error codes
-- dates
-
-### `summary`
-Use for:
-- section summaries
-- whole-document summaries
-- key-point summaries
-
-### `ocr_extract`
-Use for:
-- screenshot text
-- scanned pages
-- image-only pages
-
-### `section_understanding`
-Use for:
-- “what does this section mean?”
-- structure/navigation questions
-
-### `not_found`
-Use for:
-- questions the document should *not* answer
-- confidence gating tests
-
-### `bilingual`
-Use for:
-- English question / Korean document
-- Korean question / English document
-- mixed technical terminology
-
-## Good Benchmark Design Rules
-
-- Use real Tilon documents whenever possible
-- Keep questions realistic, like what teammates would actually ask
-- Include both easy and hard questions
-- Include negative questions where the correct answer is “not found”
-- Include screenshot and scanned-document cases
-- Keep `expected_answer_points` short and checkable
-
-## QLoRA Connection
-
-This benchmark is not the same thing as the final QLoRA dataset, but it is the best foundation for it.
-
-The benchmark tells you:
-- whether retrieval is good enough
-- whether the live prompt format is stable
-- what kinds of grounded answers you want the fine-tuned model to produce
-
-When the benchmark is mature enough, selected items can be extended with:
-- retrieved context
-- ideal final answer
-- citation style
-
-That becomes the supervised QLoRA dataset.
-
-## QLoRA Starter File
-
-The file `qlora_train_v1.jsonl` is the first supervised training scaffold.
-
-It uses this shape:
+Each training row looks like:
 
 ```json
 {
@@ -220,27 +110,78 @@ It uses this shape:
 }
 ```
 
-Recommended rules when expanding it:
-
+Rules when expanding:
 - keep `context` close to the live retrieval format
 - keep `answer` grounded and concise
-- include clarification answers for ambiguous upload cases
+- include clarification answers for ambiguous bundled uploads
 - include refusal answers for true `not_found` cases
-- preserve benchmark linkage through `source_benchmark_id`
+- preserve benchmark linkage where possible
 
-## From Dataset To Training
+## Current Dataset Evolution
 
-Once the dataset is large enough, use:
+### `qlora_train_v1`
+- first scaffold
+- benchmark-linked starter set
+
+### `qlora_train_v2`
+- broader expansion
+- useful, but showed that more data alone was not enough
+
+### `qlora_train_v3`
+- smaller, more selective high-signal set
+- used to produce `v5`
+
+### `qlora_train_v4`
+- booster set focused on:
+  - comparison
+  - clarification
+  - mention-only
+  - stricter not-found wording
+  - bundled summary behavior
+- used to produce `v6`
+
+## Current Best Adapter Link
+
+Current best adapter:
+- [qwen25-qlora-v6](/home/tilon/chatbot-karbi/finetuning/output/qwen25-qlora-v6)
+
+Current strongest strict result:
+- eval set: [qlora_eval_ko_strict_v2.jsonl](/home/tilon/chatbot-karbi/finetuning/data/qlora_eval_ko_strict_v2.jsonl)
+- base avg: `0.244`
+- adapter avg: `0.4173`
+
+## Run Benchmark
 
 ```bash
-python finetuning/train.py \
-  --data finetuning/data/qlora_train_v1.jsonl \
-  --model Qwen/Qwen2.5-7B-Instruct \
-  --output finetuning/output/qwen25-qlora-v1
+python scripts/validate_benchmark.py --path finetuning/data/benchmark_tilon_v1.jsonl
+python scripts/run_benchmark.py --path finetuning/data/benchmark_tilon_v1.jsonl --mode both
 ```
 
-Current expectation:
+Upload-scoped benchmark:
 
-- `qlora_train_v1.jsonl` is a starter set
-- it is useful for testing the training workflow
-- it is not yet large enough for a strong final adapter
+```bash
+python scripts/validate_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl
+python scripts/run_benchmark.py --path finetuning/data/benchmark_upload_scoped_v1.jsonl --mode both
+```
+
+Comparison benchmark:
+
+```bash
+python scripts/validate_benchmark.py --path finetuning/data/benchmark_compare_v1.jsonl
+python scripts/run_benchmark.py --path finetuning/data/benchmark_compare_v1.jsonl --mode both
+```
+
+## Advanced Dataset Directions
+
+These were deferred earlier, but they are now part of the roadmap for full-project improvement:
+
+- failure-mined booster sets from real chatbot logs
+- richer comparison-only and clarification-only eval slices
+- clause-level examples for article-number questions
+- table-aware and form-aware examples
+- preference data for refusal and comparison behavior
+- controlled synthetic augmentation after real-document coverage is strong
+
+## Current Recommendation
+
+The dataset work should stay selective and failure-driven. The project already proved that broad expansion is not automatically better than targeted high-signal additions.

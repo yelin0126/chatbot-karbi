@@ -1,43 +1,74 @@
 """
-Ollama LLM client.
+LLM runtime client.
 
-IMPROVEMENTS over original:
-- Retry logic (original failed immediately on timeout)
-- Structured response parsing
-- Connection health check
-- Configurable timeout / temperature / max_tokens from config
+Supports:
+- Ollama-backed inference
+- local Hugging Face + PEFT adapter inference
 """
 
+from __future__ import annotations
+
+import copy
+import gc
+import importlib.util
+import json
 import logging
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import HTTPException
 
 from app.config import (
+    AVAILABLE_MODELS,
+    LLM_BACKEND,
+    LLM_MAX_TOKENS,
+    LLM_TEMPERATURE,
+    LLM_TIMEOUT,
+    LOCAL_LLM_ADAPTER_PATH,
+    LOCAL_LLM_BASE_MODEL,
+    LOCAL_LLM_DEVICE,
+    LOCAL_LLM_LOAD_IN_4BIT,
+    LOCAL_LLM_LOCAL_FILES_ONLY,
+    LOCAL_LLM_MAX_INPUT_TOKENS,
+    LOCAL_LLM_MODEL_NAME,
+    LOCAL_LLM_OOM_RETRY_INPUT_TOKENS,
+    LOCAL_LLM_OOM_RETRY_MAX_TOKENS,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
-    LLM_TEMPERATURE,
-    LLM_MAX_TOKENS,
-    LLM_TIMEOUT,
 )
 
 logger = logging.getLogger("tilon.llm")
 
 MAX_RETRIES = 2
+LOCAL_BACKEND_NAME = "local_hf"
+OLLAMA_BACKEND_NAME = "ollama"
+
+_LOCAL_RUNTIME: Optional[dict[str, Any]] = None
 
 
-def call_ollama(
+def _dependency_available(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
+def get_default_model_name() -> str:
+    if LLM_BACKEND == LOCAL_BACKEND_NAME:
+        return LOCAL_LLM_MODEL_NAME
+    return OLLAMA_MODEL
+
+
+def get_available_models() -> list[str]:
+    if LLM_BACKEND == LOCAL_BACKEND_NAME:
+        return [LOCAL_LLM_MODEL_NAME]
+    return [model.strip() for model in AVAILABLE_MODELS if model.strip()]
+
+
+def _call_ollama(
     prompt: str,
     model: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Send a prompt to Ollama and return the response dict.
-
-    Retries once on timeout. Raises HTTPException on failure.
-    """
     model = model or OLLAMA_MODEL
     temperature = temperature if temperature is not None else LLM_TEMPERATURE
     max_tokens = max_tokens or LLM_MAX_TOKENS
@@ -55,7 +86,7 @@ def call_ollama(
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.debug("Ollama request (attempt %d) → model=%s", attempt, model)
+            logger.debug("Ollama request (attempt %d) -> model=%s", attempt, model)
             response = requests.post(
                 f"{OLLAMA_BASE_URL}/generate",
                 json=payload,
@@ -75,30 +106,335 @@ def call_ollama(
         except requests.exceptions.Timeout:
             last_error = f"Ollama timeout after {LLM_TIMEOUT}s (attempt {attempt})"
             logger.warning(last_error)
-        except requests.exceptions.ConnectionError as e:
-            last_error = f"Cannot connect to Ollama at {OLLAMA_BASE_URL}: {e}"
+        except requests.exceptions.ConnectionError as exc:
+            last_error = f"Cannot connect to Ollama at {OLLAMA_BASE_URL}: {exc}"
             logger.error(last_error)
-            break  # no point retrying connection errors
+            break
         except HTTPException:
             raise
-        except Exception as e:
-            last_error = str(e)
-            logger.error("Ollama unexpected error: %s", e)
+        except Exception as exc:
+            last_error = str(exc)
+            logger.error("Ollama unexpected error: %s", exc)
             break
 
     raise HTTPException(status_code=500, detail=f"Ollama request failed: {last_error}")
 
 
-def check_ollama_health() -> Dict[str, Any]:
-    """Check if Ollama is reachable and return available models."""
+def _resolve_local_base_model(adapter_path: Path) -> str:
+    if LOCAL_LLM_BASE_MODEL:
+        return LOCAL_LLM_BASE_MODEL
+
+    run_config_path = adapter_path / "run_config.json"
+    if run_config_path.exists():
+        try:
+            payload = json.loads(run_config_path.read_text(encoding="utf-8"))
+            model_name = str(payload.get("model") or "").strip()
+            if model_name:
+                return model_name
+        except Exception:
+            logger.warning("Failed to read base model from %s", run_config_path, exc_info=True)
+
+    return "Qwen/Qwen2.5-7B-Instruct"
+
+
+def _build_local_generation_config(model, tokenizer, temperature: Optional[float], max_tokens: Optional[int]):
+    generation_config = copy.deepcopy(model.generation_config)
+    generation_config.max_new_tokens = max_tokens or LLM_MAX_TOKENS
+    generation_config.do_sample = (temperature if temperature is not None else LLM_TEMPERATURE) > 0
+    generation_config.repetition_penalty = 1.1
+    generation_config.no_repeat_ngram_size = 4
+    generation_config.pad_token_id = tokenizer.pad_token_id
+    generation_config.eos_token_id = tokenizer.eos_token_id
+    if generation_config.do_sample:
+        generation_config.temperature = temperature if temperature is not None else LLM_TEMPERATURE
+        generation_config.top_p = 1.0
+    else:
+        generation_config.temperature = None
+        generation_config.top_p = None
+        if hasattr(generation_config, "top_k"):
+            generation_config.top_k = None
+    return generation_config
+
+
+def _load_local_runtime() -> dict[str, Any]:
+    global _LOCAL_RUNTIME
+    if _LOCAL_RUNTIME is not None:
+        return _LOCAL_RUNTIME
+
+    missing = [
+        name
+        for name in ("torch", "transformers", "peft", "accelerate")
+        if not _dependency_available(name)
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Local HF backend is not available because inference dependencies are missing: "
+                + ", ".join(missing)
+            ),
+        )
+
+    adapter_path = Path(LOCAL_LLM_ADAPTER_PATH)
+    if not adapter_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Local adapter path not found: {adapter_path}",
+        )
+
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    quant_config = None
+    model_kwargs: dict[str, Any] = {
+        "trust_remote_code": True,
+        "local_files_only": LOCAL_LLM_LOCAL_FILES_ONLY,
+    }
+
+    if LOCAL_LLM_DEVICE == "cuda" and LOCAL_LLM_LOAD_IN_4BIT and _dependency_available("bitsandbytes"):
+        from transformers import BitsAndBytesConfig
+
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        model_kwargs["quantization_config"] = quant_config
+        model_kwargs["device_map"] = "auto"
+
+    base_model_name = _resolve_local_base_model(adapter_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model_name,
+        use_fast=True,
+        local_files_only=LOCAL_LLM_LOCAL_FILES_ONLY,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, **model_kwargs)
+    base_model.eval()
+    model = PeftModel.from_pretrained(base_model, str(adapter_path))
+    model.eval()
+
+    _LOCAL_RUNTIME = {
+        "adapter_path": str(adapter_path),
+        "base_model_name": base_model_name,
+        "tokenizer": tokenizer,
+        "model": model,
+    }
+    logger.info(
+        "Loaded local HF backend -> adapter=%s base_model=%s",
+        adapter_path,
+        base_model_name,
+    )
+    return _LOCAL_RUNTIME
+
+
+def _free_local_cuda_cache() -> None:
+    try:
+        import torch
+    except Exception:
+        return
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _encode_local_prompt(tokenizer, rendered_prompt: str, max_input_tokens: int):
+    import torch
+
+    encoded = tokenizer(rendered_prompt, return_tensors="pt", truncation=False)
+    input_ids = encoded["input_ids"]
+    seq_len = input_ids.shape[1]
+    if seq_len <= max_input_tokens:
+        return encoded
+
+    # Preserve the instruction prefix and the most recent context/user message.
+    head_tokens = min(512, max_input_tokens // 4)
+    tail_tokens = max_input_tokens - head_tokens
+    trimmed = {}
+    for key, value in encoded.items():
+        trimmed[key] = torch.cat(
+            [value[:, :head_tokens], value[:, -tail_tokens:]],
+            dim=1,
+        )
+    logger.warning(
+        "Trimmed local HF prompt from %d to %d tokens (head=%d, tail=%d)",
+        seq_len,
+        max_input_tokens,
+        head_tokens,
+        tail_tokens,
+    )
+    return trimmed
+
+
+def _generate_local_text(
+    prompt: str,
+    messages: Optional[List[Dict[str, str]]] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
+    runtime = _load_local_runtime()
+    tokenizer = runtime["tokenizer"]
+    model = runtime["model"]
+
+    # Use structured messages when provided — matches the system+user split used
+    # during QLoRA training (render_document_chat in finetuning/train.py).
+    # Falling back to a single user-role wrap only when no messages are given
+    # (e.g. raw string prompts from the language-retry path).
+    chat_messages = messages if messages else [{"role": "user", "content": prompt}]
+    rendered_prompt = tokenizer.apply_chat_template(
+        chat_messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    generation_config = _build_local_generation_config(model, tokenizer, temperature, max_tokens)
+
+    import torch
+
+    encoded = _encode_local_prompt(
+        tokenizer,
+        rendered_prompt,
+        LOCAL_LLM_MAX_INPUT_TOKENS,
+    )
+    encoded = {key: value.to(model.device) for key, value in encoded.items()}
+
+    try:
+        with torch.inference_mode():
+            output = model.generate(**encoded, generation_config=generation_config)
+    except torch.cuda.OutOfMemoryError:
+        logger.warning(
+            "Local HF generation OOM; retrying with shorter input/output budget",
+            exc_info=True,
+        )
+        _free_local_cuda_cache()
+        retry_max_tokens = min(max_tokens or LLM_MAX_TOKENS, LOCAL_LLM_OOM_RETRY_MAX_TOKENS)
+        retry_config = _build_local_generation_config(model, tokenizer, temperature, retry_max_tokens)
+        retry_encoded = _encode_local_prompt(
+            tokenizer,
+            rendered_prompt,
+            LOCAL_LLM_OOM_RETRY_INPUT_TOKENS,
+        )
+        retry_encoded = {key: value.to(model.device) for key, value in retry_encoded.items()}
+        try:
+            with torch.inference_mode():
+                output = model.generate(**retry_encoded, generation_config=retry_config)
+            encoded = retry_encoded
+        except torch.cuda.OutOfMemoryError as exc:
+            _free_local_cuda_cache()
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Local HF inference ran out of GPU memory. "
+                    "문서 범위를 줄이거나 더 짧은 질문으로 다시 시도해 주세요."
+                ),
+            ) from exc
+    finally:
+        _free_local_cuda_cache()
+
+    answer = tokenizer.decode(
+        output[0][encoded["input_ids"].shape[1]:],
+        skip_special_tokens=True,
+    ).strip()
+    del output
+    return answer
+
+
+def generate_text(
+    prompt: str,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    if LLM_BACKEND == LOCAL_BACKEND_NAME:
+        return _generate_local_text(
+            prompt=prompt,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    result = _call_ollama(
+        prompt=prompt,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return (result.get("response") or "").strip()
+
+
+def check_llm_health() -> Dict[str, Any]:
+    if LLM_BACKEND == LOCAL_BACKEND_NAME:
+        adapter_path = Path(LOCAL_LLM_ADAPTER_PATH)
+        missing = [
+            name
+            for name in ("torch", "transformers", "peft", "accelerate")
+            if not _dependency_available(name)
+        ]
+        if missing:
+            return {
+                "status": "disconnected",
+                "backend": LOCAL_BACKEND_NAME,
+                "model": LOCAL_LLM_MODEL_NAME,
+                "error": f"Missing dependencies: {', '.join(missing)}",
+            }
+        if not adapter_path.exists():
+            return {
+                "status": "disconnected",
+                "backend": LOCAL_BACKEND_NAME,
+                "model": LOCAL_LLM_MODEL_NAME,
+                "error": f"Adapter path not found: {adapter_path}",
+            }
+        return {
+            "status": "connected",
+            "backend": LOCAL_BACKEND_NAME,
+            "model": LOCAL_LLM_MODEL_NAME,
+            "adapter_path": str(adapter_path),
+            "loaded": _LOCAL_RUNTIME is not None,
+        }
+
     try:
         response = requests.get(f"{OLLAMA_BASE_URL}/tags", timeout=10)
         response.raise_for_status()
-        return {"status": "connected", "models": response.json()}
-    except Exception as e:
-        return {"status": "disconnected", "error": str(e)}
+        return {
+            "status": "connected",
+            "backend": OLLAMA_BACKEND_NAME,
+            "model": OLLAMA_MODEL,
+            "models": response.json(),
+        }
+    except Exception as exc:
+        return {
+            "status": "disconnected",
+            "backend": OLLAMA_BACKEND_NAME,
+            "model": OLLAMA_MODEL,
+            "error": str(exc),
+        }
 
 
-def get_response_text(ollama_result: Dict[str, Any]) -> str:
-    """Extract and clean the response text from Ollama output."""
-    return (ollama_result.get("response") or "").strip()
+def call_ollama(
+    prompt: str,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
+    return _call_ollama(
+        prompt=prompt,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def check_ollama_health() -> Dict[str, Any]:
+    return check_llm_health()
+
+
+def get_response_text(result: Dict[str, Any]) -> str:
+    if "response" in result:
+        return (result.get("response") or "").strip()
+    return (result.get("text") or "").strip()

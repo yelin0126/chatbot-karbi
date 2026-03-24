@@ -157,22 +157,22 @@ def _validate_rows(rows: Iterable[Dict], data_path: Path) -> List[Dict]:
     return validated
 
 
-def build_document_prompt(system_prompt: str, user_message: str, context: str) -> str:
-    return f"""[시스템 지침]
-{system_prompt}
+def build_document_system_message(system_prompt: str) -> str:
+    return (
+        f"{system_prompt}\n\n"
+        "답변 규칙:\n"
+        f"1. {LANG_RULE}\n"
+        "2. 제공된 문서 문맥만 근거로 답한다.\n"
+        "3. 문서에 없는 내용은 추측하지 않는다.\n"
+        '4. 문맥이 부족하면 "해당 내용은 제공된 문서에서 확인되지 않습니다."라고 답한다.\n'
+        "5. 핵심 답변을 먼저 말한다.\n"
+        "6. 가능하면 페이지와 문서를 근거로 설명한다.\n"
+        "7. 이미지에서 추출된 텍스트가 제공되면 해당 텍스트를 기반으로 답한다."
+    ).strip()
 
-답변 규칙:
-1. {LANG_RULE}
-2. 제공된 문서 문맥만 근거로 답한다.
-3. 문서에 없는 내용은 추측하지 않는다.
-4. 문맥이 부족하면 "해당 내용은 제공된 문서에서 확인되지 않습니다."라고 답한다.
-5. 핵심 답변을 먼저 말한다.
-6. 가능하면 페이지와 문서를 근거로 설명한다.
-7. 이미지에서 추출된 텍스트가 제공되면 해당 텍스트를 기반으로 답한다.
 
-[대화 이력]
-
-[검색된 문서]
+def build_document_user_message(user_message: str, context: str) -> str:
+    return f"""[검색된 문서]
 {context if context else "검색된 관련 문서 없음"}
 
 [사용자 질문]
@@ -182,6 +182,42 @@ def build_document_prompt(system_prompt: str, user_message: str, context: str) -
 - 핵심 답변:
 - 근거 요약:
 - 참고 문서:""".strip()
+
+
+def build_document_prompt(system_prompt: str, user_message: str, context: str) -> str:
+    return (
+        f"[시스템 지침]\n{build_document_system_message(system_prompt)}\n\n"
+        f"{build_document_user_message(user_message, context)}"
+    ).strip()
+
+
+def build_document_messages(system_prompt: str, user_message: str, context: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": build_document_system_message(system_prompt)},
+        {"role": "user", "content": build_document_user_message(user_message, context)},
+    ]
+
+
+def render_document_chat(
+    tokenizer,
+    system_prompt: str,
+    user_message: str,
+    context: str,
+    assistant_answer: str = "",
+    add_generation_prompt: bool = False,
+) -> str:
+    messages = build_document_messages(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        context=context,
+    )
+    if assistant_answer:
+        messages.append({"role": "assistant", "content": assistant_answer})
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=add_generation_prompt,
+    )
 
 
 @dataclass
@@ -267,6 +303,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     rows = _validate_rows(_read_jsonl(data_path), data_path)
+    row_lookup = {str(row["id"]): row for row in rows}
     formatted = format_samples(rows, system_prompt=args.system_prompt)
     train_samples, eval_samples = split_samples(
         formatted,
@@ -348,13 +385,28 @@ def main() -> None:
     model = get_peft_model(model, lora_config)
 
     def encode_sample(sample: FormattedSample) -> Dict:
-        prompt_text = sample.prompt + "\n"
-        answer_text = sample.answer + tokenizer.eos_token
+        row = row_lookup[sample.sample_id]
+        prompt_text = render_document_chat(
+            tokenizer=tokenizer,
+            system_prompt=args.system_prompt,
+            user_message=str(row["question"]).strip(),
+            context=str(row["context"]).strip(),
+            add_generation_prompt=True,
+        )
+        full_text = render_document_chat(
+            tokenizer=tokenizer,
+            system_prompt=args.system_prompt,
+            user_message=str(row["question"]).strip(),
+            context=str(row["context"]).strip(),
+            assistant_answer=sample.answer,
+            add_generation_prompt=False,
+        )
 
-        prompt_ids = tokenizer(prompt_text, add_special_tokens=True, truncation=False)["input_ids"]
-        answer_ids = tokenizer(answer_text, add_special_tokens=False, truncation=False)["input_ids"]
+        prompt_ids = tokenizer(prompt_text, add_special_tokens=False, truncation=False)["input_ids"]
+        full_ids = tokenizer(full_text, add_special_tokens=False, truncation=False)["input_ids"]
+        answer_ids = full_ids[len(prompt_ids):]
 
-        input_ids = (prompt_ids + answer_ids)[: args.max_seq_len]
+        input_ids = full_ids[: args.max_seq_len]
         labels = ([-100] * len(prompt_ids) + answer_ids)[: args.max_seq_len]
         attention_mask = [1] * len(input_ids)
         return {
@@ -395,12 +447,19 @@ def main() -> None:
         "seed": args.seed,
     }
 
+    # Keep the optimizer footprint low on 12GB-class cards when running QLoRA.
+    if use_4bit and _dependency_available("bitsandbytes"):
+        training_kwargs["optim"] = "paged_adamw_8bit"
+
     strategy_value = "steps" if eval_dataset is not None else "no"
     training_signature = inspect.signature(TrainingArguments.__init__)
     if "eval_strategy" in training_signature.parameters:
         training_kwargs["eval_strategy"] = strategy_value
     else:
         training_kwargs["evaluation_strategy"] = strategy_value
+
+    if "gradient_checkpointing_kwargs" in training_signature.parameters:
+        training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
 
     training_args = TrainingArguments(**training_kwargs)
 

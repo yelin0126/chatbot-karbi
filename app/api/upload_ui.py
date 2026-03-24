@@ -675,7 +675,8 @@ async function loadHealth(){
     try{
         const resp=await fetch('/health');const d=await resp.json();
         document.getElementById('ollamaDot').className='dot '+(d.ollama==='connected'?'green':'red');
-        document.getElementById('ollamaStatus').textContent=d.ollama==='connected'?'Online':'Offline';
+        const backend=d.llm_backend==='local_hf'?'Local HF':'Ollama';
+        document.getElementById('ollamaStatus').textContent=d.ollama==='connected'?backend:'Offline';
         document.getElementById('chunksBadge').textContent=(d.documents_in_vectorstore||0)+' chunks';
     }catch{document.getElementById('ollamaDot').className='dot red';document.getElementById('ollamaStatus').textContent='Err';}
 }
