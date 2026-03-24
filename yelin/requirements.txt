@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+httpx
+openai-whisper
+pypdf
+pdfplumber
+unstructured[pdf]
+langchain-core
+langchain-chroma
+langchain-huggingface
+langchain-community
+sentence-transformers
+chromadb
+pydantic
+python-multipart

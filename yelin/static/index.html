@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>사내 AI 어시스턴트</title>
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #f5f6f8; --bg2: #ffffff; --bg3: #f0f1f3; --bgh: #e8eaed;
+            --accent: #2563eb; --accent2: #3b82f6;
+            --tp: #1a1a2e; --ts: #64748b; --tm: #94a3b8; --border: #e2e8f0;
+            --success: #10b981; --danger: #ef4444;
+            --user-bg: rgba(37,99,235,0.07); --user-border: #2563eb; --sw: 260px;
+        }
+        body { font-family: 'Pretendard',-apple-system,sans-serif; background: var(--bg); color: var(--tp); height: 100vh; overflow: hidden; }
+
+        /* LOGIN */
+        #login-screen { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 200; }
+        .login-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 48px 40px; width: 400px; box-shadow: 0 8px 40px rgba(0,0,0,.10); }
+        .login-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 32px; }
+        .login-logo span { font-size: 20px; font-weight: 700; color: var(--tp); }
+        .login-card h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+        .login-card p { font-size: 14px; color: var(--ts); margin-bottom: 28px; }
+        .fg { margin-bottom: 16px; }
+        .fg label { display: block; font-size: 12px; font-weight: 700; color: var(--ts); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+        .fg input { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--tp); font-size: 15px; font-family: inherit; outline: none; transition: border-color .2s; }
+        .fg input:focus { border-color: var(--accent); }
+        .login-btn { width: 100%; padding: 11px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; font-family: inherit; cursor: pointer; margin-top: 8px; }
+        .login-btn:hover { background: var(--accent2); }
+        .login-err { color: var(--danger); font-size: 13px; margin-top: 10px; text-align: center; display: none; }
+
+        /* APP */
+        #app { display: none; height: 100vh; flex-direction: row; }
+
+        /* SIDEBAR */
+        .sidebar { width: var(--sw); background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+        .sb-header { padding: 16px; border-bottom: 1px solid var(--border); }
+        .ws-name { font-size: 16px; font-weight: 700; color: var(--tp); display: flex; align-items: center; }
+        .us-status { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+        .sdot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; }
+        .us-status span { font-size: 13px; color: var(--ts); }
+        .sb-search { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+        .sb-search-box { display: flex; align-items: center; gap: 6px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+        .sb-search-box input { flex: 1; background: none; border: none; outline: none; font-size: 12px; color: var(--tp); font-family: inherit; }
+        .sb-sec { padding: 12px 8px 4px; }
+        .sb-sec-title { font-size: 11px; font-weight: 700; color: var(--tm); text-transform: uppercase; letter-spacing: .8px; padding: 0 8px; margin-bottom: 4px; }
+        .sb-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; transition: background .15s; font-size: 13px; color: var(--ts); }
+        .sb-item:hover { background: var(--bgh); color: var(--tp); }
+        .sb-item.active { background: var(--accent); color: #fff; }
+        .sb-item .ic { font-size: 14px; flex-shrink: 0; }
+        .sb-item .chat-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sb-item .del-btn { opacity: 0; font-size: 11px; padding: 2px 5px; border-radius: 3px; color: var(--tm); background: none; border: none; cursor: pointer; }
+        .sb-item:hover .del-btn { opacity: 1; }
+        .sb-item .del-btn:hover { color: var(--danger); }
+        .new-btn { margin: 8px; padding: 8px 12px; background: transparent; border: 1px dashed var(--border); border-radius: 6px; color: var(--tm); font-size: 13px; font-family: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .2s; }
+        .new-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .chat-list { flex: 1; overflow-y: auto; }
+        .chat-list::-webkit-scrollbar { width: 3px; }
+        .chat-list::-webkit-scrollbar-thumb { background: var(--border); }
+        .sb-footer { padding: 12px; border-top: 1px solid var(--border); }
+        .user-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 6px; }
+        .avatar { width: 32px; height: 32px; background: var(--accent); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #fff; flex-shrink: 0; }
+        .ur-text { flex: 1; min-width: 0; }
+        .ur-name { font-size: 14px; font-weight: 600; color: var(--tp); }
+        .ur-role { font-size: 11px; color: var(--tm); }
+        .logout-btn { background: none; border: 1px solid var(--border); color: var(--ts); cursor: pointer; font-size: 11px; font-weight: 600; font-family: inherit; padding: 4px 8px; border-radius: 5px; white-space: nowrap; }
+        .logout-btn:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+        /* CHAT */
+        .chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .chat-header { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--bg); flex-shrink: 0; }
+        .chat-header h3 { font-size: 15px; font-weight: 700; color: var(--tp); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .model-chip { font-size: 11px; color: var(--ts); background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-family: monospace; }
+        .hdr-btn { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg2); color: var(--ts); font-size: 12px; font-family: inherit; cursor: pointer; transition: all .2s; white-space: nowrap; }
+        .hdr-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* PDF 상태 배너 */
+        .pdf-banner { display: none; background: rgba(16,185,129,0.08); border-bottom: 1px solid rgba(16,185,129,0.3); padding: 8px 20px; font-size: 13px; color: var(--success); align-items: center; gap: 8px; flex-shrink: 0; }
+        .pdf-banner.show { display: flex; }
+        .pdf-clear-btn { margin-left: auto; background: none; border: 1px solid rgba(16,185,129,0.4); border-radius: 4px; color: var(--success); font-size: 11px; padding: 2px 8px; cursor: pointer; font-family: inherit; }
+        .pdf-clear-btn:hover { background: rgba(239,68,68,0.1); border-color: var(--danger); color: var(--danger); }
+
+        /* MESSAGES */
+        .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 2px; scroll-behavior: smooth; }
+        .messages::-webkit-scrollbar { width: 4px; }
+        .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+        .msg-group { display: flex; flex-direction: column; margin-bottom: 14px; animation: msgIn .2s ease; }
+        @keyframes msgIn { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: translateY(0) } }
+        .msg-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+        .msg-sender { font-size: 14px; font-weight: 700; }
+        .msg-sender.ai { color: var(--accent); }
+        .msg-time { font-size: 11px; color: var(--tm); }
+        .copy-btn { opacity: 0; font-size: 11px; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg3); color: var(--ts); cursor: pointer; font-family: inherit; }
+        .msg-group:hover .copy-btn { opacity: 1; }
+        .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .msg-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--success); background: rgba(16,185,129,0.1); border-radius: 4px; padding: 2px 6px; margin-bottom: 4px; width: fit-content; }
+        .msg-text { font-size: 14px; line-height: 1.65; color: var(--tp); white-space: pre-wrap; word-break: break-word; }
+        .msg-text.user { background: var(--user-bg); border-left: 3px solid var(--user-border); padding: 8px 12px; border-radius: 0 6px 6px 0; }
+        .typing { display: flex; align-items: center; gap: 8px; color: var(--tm); font-size: 13px; padding: 4px 0; }
+        .dots { display: flex; gap: 4px; }
+        .dots span { width: 6px; height: 6px; background: var(--tm); border-radius: 50%; animation: bounce .8s infinite; }
+        .dots span:nth-child(2) { animation-delay: .15s }
+        .dots span:nth-child(3) { animation-delay: .3s }
+        @keyframes bounce { 0%,60%,100% { transform: translateY(0) } 30% { transform: translateY(-4px) } }
+
+        /* WELCOME */
+        .welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; text-align: center; gap: 10px; }
+        .welcome .wi { font-size: 44px; margin-bottom: 6px; }
+        .welcome h2 { font-size: 22px; font-weight: 700; color: var(--tp); }
+        .welcome p { font-size: 14px; color: var(--ts); max-width: 360px; line-height: 1.6; }
+        .quick-btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+        .qb { padding: 7px 14px; background: var(--bg3); border: 1px solid var(--border); border-radius: 20px; color: var(--ts); font-size: 13px; font-family: inherit; cursor: pointer; transition: all .2s; }
+        .qb:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* INPUT */
+        .input-area { padding: 10px 20px 14px; background: var(--bg); flex-shrink: 0; }
+        .input-tools { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+        .tool-btn { display: flex; align-items: center; gap: 5px; padding: 4px 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; color: var(--ts); font-size: 12px; font-family: inherit; cursor: pointer; transition: all .2s; }
+        .tool-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .tool-btn.active { border-color: var(--success); color: var(--success); background: rgba(16,185,129,.08); }
+        .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .input-box { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; display: flex; align-items: flex-end; gap: 6px; padding: 8px 8px 8px 14px; transition: border-color .2s; }
+        .input-box:focus-within { border-color: var(--accent); }
+        #msg-input { flex: 1; background: none; border: none; outline: none; color: var(--tp); font-size: 14px; font-family: inherit; resize: none; max-height: 120px; min-height: 22px; line-height: 1.5; padding: 2px 0; }
+        #msg-input::placeholder { color: var(--tm); }
+        .send-btn { width: 32px; height: 32px; background: var(--accent); border: none; border-radius: 6px; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+        .send-btn:hover { background: var(--accent2); }
+        .send-btn:disabled { background: var(--border); cursor: not-allowed; }
+        .stop-btn { width: 32px; height: 32px; background: #fee2e2; border: 1px solid var(--danger); border-radius: 6px; color: var(--danger); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+        .input-hint { font-size: 11px; color: var(--tm); margin-top: 5px; text-align: center; }
+
+        /* TOAST */
+        .toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 13px; color: var(--tp); z-index: 300; opacity: 0; transform: translateY(8px); transition: all .3s; pointer-events: none; }
+        .toast.show { opacity: 1; transform: translateY(0); }
+
+        /* 시스템 프롬프트 모달 */
+        .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; display: none; align-items: center; justify-content: center; }
+        .modal-bg.open { display: flex; }
+        .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 28px; width: 500px; max-width: 90vw; }
+        .modal h3 { font-size: 17px; font-weight: 700; margin-bottom: 6px; color: var(--tp); }
+        .modal p { font-size: 13px; color: var(--ts); margin-bottom: 16px; }
+        .modal textarea { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 12px; color: var(--tp); font-size: 13px; font-family: inherit; resize: vertical; min-height: 120px; outline: none; line-height: 1.5; }
+        .modal textarea:focus { border-color: var(--accent); }
+        .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+        .mbtn { padding: 8px 18px; border-radius: 6px; font-size: 14px; font-family: inherit; cursor: pointer; border: none; }
+        .mbtn.cancel { background: var(--bg3); color: var(--ts); border: 1px solid var(--border); }
+        .mbtn.save { background: var(--accent); color: #fff; }
+
+        @media(max-width:600px) { .sidebar { display: none; } }
+    </style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+<!-- 시스템 프롬프트 모달 -->
+<div class="modal-bg" id="sp-modal">
+    <div class="modal">
+        <h3>⚙️ 시스템 프롬프트 설정</h3>
+        <p>AI의 역할과 응답 방식을 지정하세요.</p>
+        <textarea id="sp-input" placeholder="예: 당신은 사내 법무팀 AI 어시스턴트입니다."></textarea>
+        <div class="modal-btns">
+            <button class="mbtn cancel" onclick="closeModal('sp-modal')">취소</button>
+            <button class="mbtn save" onclick="savePrompt()">저장</button>
+        </div>
+    </div>
+</div>
+
+<!-- 로그인 -->
+<div id="login-screen">
+    <div class="login-card">
+        <div class="login-logo">
+            <svg width="28" height="28" viewBox="0 0 22 22" fill="none">
+                <circle cx="6" cy="6" r="5" fill="#EF4444"/>
+                <circle cx="16" cy="6" r="5" fill="#FBBF24"/>
+                <circle cx="6" cy="16" r="5" fill="#22C55E"/>
+                <circle cx="16" cy="16" r="5" fill="#3B82F6"/>
+            </svg>
+            <span>틸론 AI</span>
+        </div>
+        <h2>로그인</h2>
+        <p>직원 계정으로 로그인하세요</p>
+        <div class="fg"><label>아이디</label><input type="text" id="li-id" placeholder="아이디 입력" autocomplete="off"></div>
+        <div class="fg"><label>비밀번호</label><input type="password" id="li-pw" placeholder="비밀번호 입력"></div>
+        <button class="login-btn" onclick="doLogin()">로그인</button>
+        <div class="login-err" id="li-err">아이디 또는 비밀번호가 올바르지 않습니다.</div>
+    </div>
+</div>
+
+<!-- 앱 -->
+<div id="app">
+    <div class="sidebar">
+        <div class="sb-header">
+            <div class="ws-name">
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style="margin-right:6px">
+                    <circle cx="6" cy="6" r="5" fill="#EF4444"/>
+                    <circle cx="16" cy="6" r="5" fill="#FBBF24"/>
+                    <circle cx="6" cy="16" r="5" fill="#22C55E"/>
+                    <circle cx="16" cy="16" r="5" fill="#3B82F6"/>
+                </svg>
+                틸론 AI
+            </div>
+            <div class="us-status"><div class="sdot"></div><span id="sb-user">직원</span></div>
+        </div>
+        <div class="sb-search">
+            <div class="sb-search-box">
+                <span>🔎</span>
+                <input type="text" placeholder="채팅 검색..." oninput="filterChats(this.value)">
+            </div>
+        </div>
+        <div class="sb-sec"><div class="sb-sec-title">채팅 목록</div></div>
+        <button class="new-btn" onclick="newChat()">＋ 새 채팅</button>
+        <div class="chat-list" id="chat-list"></div>
+        <div class="sb-sec">
+            <div class="sb-sec-title">빠른 메뉴</div>
+            <div class="sb-item" onclick="quickMsg('오늘 할 일 목록 정리해줘')"><span class="ic">✅</span> 업무 정리</div>
+            <div class="sb-item" onclick="quickMsg('이메일 초안 작성해줘')"><span class="ic">✉️</span> 이메일 작성</div>
+            <div class="sb-item" onclick="quickMsg('회의록 요약해줘')"><span class="ic">📄</span> 회의록 요약</div>
+        </div>
+        <div class="sb-footer">
+            <div class="user-row">
+                <div class="avatar" id="u-avatar">A</div>
+                <div class="ur-text">
+                    <div class="ur-name" id="u-name">직원</div>
+                    <div class="ur-role" id="u-role">일반 직원</div>
+                </div>
+                <button class="logout-btn" onclick="doLogout()">로그아웃</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="chat-area">
+        <div class="chat-header">
+            <span style="font-size:16px">💬</span>
+            <h3 id="hdr-title">새 채팅</h3>
+            <span class="model-chip" id="model-chip">qwen2.5:7b</span>
+            <button class="hdr-btn" onclick="openModal('sp-modal')">⚙️ 프롬프트</button>
+        </div>
+
+        <!-- PDF 연결 상태 배너 -->
+        <div class="pdf-banner" id="pdf-banner">
+            <span>📄</span>
+            <span id="pdf-banner-name">PDF 연결됨</span>
+            <button class="pdf-clear-btn" onclick="clearPDF()">✕ PDF 해제</button>
+        </div>
+
+        <div class="messages" id="messages"></div>
+
+        <div class="input-area">
+            <div class="input-tools">
+                <button class="tool-btn" id="pdf-btn" onclick="document.getElementById('pdf-file').click()">📎 PDF 업로드</button>
+                <input type="file" id="pdf-file" accept=".pdf" style="display:none" onchange="uploadPDF(this)">
+            </div>
+            <div class="input-box">
+                <textarea id="msg-input" rows="1" placeholder="메시지 입력... (Shift+Enter 줄바꿈)"></textarea>
+                <button class="stop-btn" id="stop-btn" onclick="stopGeneration()" style="display:none">⏹</button>
+                <button class="send-btn" id="send-btn" onclick="sendMsg()">➤</button>
+            </div>
+            <div class="input-hint">AI가 실수할 수 있습니다. 중요한 정보는 반드시 확인하세요.</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ── 설정 ──────────────────────────────────────────────────────
+    const API = 'http://172.16.5.41:8091';
+
+    const USERS = JSON.parse(localStorage.getItem('ai_users') || 'null') || {
+        'admin': { pw: 'admin123', role: '관리자' },
+        'tilon': { pw: 'tilon123', role: '일반 직원' },
+        '직원1': { pw: '1234',     role: '일반 직원' },
+    };
+
+    let currentUser   = null;
+    let isLoading     = false;
+    let abortController = null;
+    let systemPrompt  = localStorage.getItem('ai_sys_prompt') || '당신은 사내 AI 어시스턴트입니다. 한국어로 친절하고 명확하게 답변하세요.';
+    let chats         = JSON.parse(localStorage.getItem('ai_chats') || '[]');
+    let currentChatId = null;
+
+    // ── PDF 세션 ──────────────────────────────────────────────────
+    // 업로드 후 서버에서 받은 session_id를 여기 저장
+    let pdfSessionId  = null;
+    let pdfFilename   = null;
+
+    // ── 유틸 ──────────────────────────────────────────────────────
+    function now() { return new Date().toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit' }); }
+    function esc(t) { return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function saveChats() { localStorage.setItem('ai_chats', JSON.stringify(chats)); }
+
+    function toast(msg, dur=2500) {
+        const el = document.getElementById('toast');
+        el.textContent = msg; el.classList.add('show');
+        setTimeout(() => el.classList.remove('show'), dur);
+    }
+
+    // ── 로그인 ────────────────────────────────────────────────────
+    function doLogin() {
+        const id = document.getElementById('li-id').value.trim();
+        const pw = document.getElementById('li-pw').value;
+        const u  = USERS[id];
+        if (u && u.pw === pw) {
+            currentUser = { id, role: u.role };
+            document.getElementById('li-err').style.display = 'none';
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = 'flex';
+            document.getElementById('sb-user').textContent = id;
+            document.getElementById('u-name').textContent  = id;
+            document.getElementById('u-role').textContent  = u.role;
+            document.getElementById('u-avatar').textContent = id[0].toUpperCase();
+            renderChatList();
+            if (chats.length === 0) newChat(); else loadChat(chats[0].id);
+            loadHealth();
+        } else {
+            document.getElementById('li-err').style.display = 'block';
+            document.getElementById('li-pw').value = '';
+        }
+    }
+
+    function doLogout() {
+        currentUser = null;
+        clearPDF();
+        document.getElementById('login-screen').style.display = 'flex';
+        document.getElementById('app').style.display = 'none';
+        document.getElementById('li-id').value = '';
+        document.getElementById('li-pw').value = '';
+    }
+
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && document.getElementById('login-screen').style.display !== 'none') doLogin();
+    });
+
+    // ── 헬스체크 ──────────────────────────────────────────────────
+    async function loadHealth() {
+        try {
+            const r = await fetch(API + '/health');
+            const d = await r.json();
+            if (d.model) document.getElementById('model-chip').textContent = d.model;
+        } catch {}
+    }
+
+    // ── 모달 ──────────────────────────────────────────────────────
+    function openModal(id) {
+        if (id === 'sp-modal') document.getElementById('sp-input').value = systemPrompt;
+        document.getElementById(id).classList.add('open');
+    }
+    function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+    document.querySelectorAll('.modal-bg').forEach(bg => {
+        bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('open'); });
+    });
+
+    function savePrompt() {
+        systemPrompt = document.getElementById('sp-input').value.trim()
+            || '당신은 사내 AI 어시스턴트입니다. 한국어로 친절하고 명확하게 답변하세요.';
+        localStorage.setItem('ai_sys_prompt', systemPrompt);
+        closeModal('sp-modal'); toast('✅ 시스템 프롬프트 저장됨');
+    }
+
+    // ── PDF 업로드 ────────────────────────────────────────────────
+    async function uploadPDF(input) {
+        const file = input.files[0]; if (!file) return;
+        const btn  = document.getElementById('pdf-btn');
+        btn.textContent = '⏳ 업로드 중...';
+        btn.disabled = true;
+
+        try {
+            const fd = new FormData();
+            fd.append('file', file);
+
+            const res = await fetch(API + '/upload', { method: 'POST', body: fd });
+            if (!res.ok) throw new Error('서버 오류');
+
+            const d = await res.json();
+
+            // session_id 저장
+            pdfSessionId = d.session_id;
+            pdfFilename  = file.name;
+
+            // PDF 배너 표시
+            document.getElementById('pdf-banner-name').textContent = '📄 ' + file.name + ' 연결됨';
+            document.getElementById('pdf-banner').classList.add('show');
+
+            // 버튼 상태 변경
+            btn.textContent = '📎 PDF 변경';
+            btn.className   = 'tool-btn active';
+            btn.disabled    = false;
+
+            // 채팅에 안내 메시지 출력
+            const welcome = document.getElementById('welcome'); if (welcome) welcome.remove();
+            renderMsg('AI 어시스턴트',
+                '📄 ' + file.name + ' 업로드 완료!\n' + d.message + '\n\n이 문서에 대해 질문하세요.',
+                false, true, true);
+
+            toast('📄 PDF 준비 완료! 이제 질문하세요.');
+        } catch (err) {
+            toast('❌ PDF 업로드 실패: ' + err.message);
+            btn.textContent = '📎 PDF 업로드';
+            btn.className   = 'tool-btn';
+            btn.disabled    = false;
+        }
+        input.value = '';
+    }
+
+    // ── PDF 해제 ──────────────────────────────────────────────────
+    async function clearPDF() {
+        if (pdfSessionId) {
+            try { await fetch(API + '/session/' + pdfSessionId, { method: 'DELETE' }); } catch {}
+            pdfSessionId = null;
+            pdfFilename  = null;
+        }
+        document.getElementById('pdf-banner').classList.remove('show');
+        const btn = document.getElementById('pdf-btn');
+        btn.textContent = '📎 PDF 업로드';
+        btn.className   = 'tool-btn';
+        toast('PDF 해제됨');
+    }
+
+    // ── 채팅 목록 ──────────────────────────────────────────────────
+    function newChat() {
+        clearPDF();
+        const id = 'c_' + Date.now();
+        chats.unshift({ id, title: '새 채팅', messages: [] });
+        saveChats(); renderChatList(); loadChat(id);
+    }
+
+    function loadChat(id) {
+        currentChatId = id;
+        const chat = chats.find(c => c.id === id); if (!chat) return;
+        document.getElementById('hdr-title').textContent = chat.title;
+        document.querySelectorAll('.sb-item[data-id]').forEach(el =>
+            el.classList.toggle('active', el.dataset.id === id));
+        const msgs = document.getElementById('messages');
+        msgs.innerHTML = '';
+        if (chat.messages.length === 0) {
+            msgs.innerHTML = `<div class="welcome" id="welcome">
+                <div class="wi">🤖</div>
+                <h2>무엇을 도와드릴까요?</h2>
+                <p>질문하거나 PDF를 업로드해서 문서 기반 답변을 받아보세요.</p>
+                <div class="quick-btns">
+                    <button class="qb" onclick="quickMsg('오늘 할 일 정리해줘')">📝 할 일 정리</button>
+                    <button class="qb" onclick="quickMsg('이메일 답변 작성해줘')">✉️ 이메일 작성</button>
+                    <button class="qb" onclick="quickMsg('업무 보고서 형식 알려줘')">📊 보고서 작성</button>
+                </div>
+            </div>`;
+        } else {
+            chat.messages.forEach(m => renderMsg(m.sender, m.text, m.isUser, m.hasPdf, false));
+            msgs.scrollTop = msgs.scrollHeight;
+        }
+    }
+
+    function deleteChat(id, e) {
+        e.stopPropagation();
+        chats = chats.filter(c => c.id !== id);
+        saveChats(); renderChatList();
+        if (currentChatId === id) { if (chats.length > 0) loadChat(chats[0].id); else newChat(); }
+    }
+
+    function renderChatList() {
+        const list = document.getElementById('chat-list');
+        list.innerHTML = '';
+        chats.forEach(chat => {
+            const el = document.createElement('div');
+            el.className = 'sb-item' + (chat.id === currentChatId ? ' active' : '');
+            el.dataset.id = chat.id;
+            el.innerHTML = `<span class="ic">💬</span><span class="chat-name">${esc(chat.title)}</span>
+                <button class="del-btn" onclick="deleteChat('${chat.id}',event)">✕</button>`;
+            el.onclick = e => { if (!e.target.classList.contains('del-btn')) loadChat(chat.id); };
+            list.appendChild(el);
+        });
+    }
+
+    function filterChats(kw) {
+        kw = kw.toLowerCase();
+        document.querySelectorAll('.sb-item[data-id]').forEach(el => {
+            el.style.display = (!kw || el.querySelector('.chat-name').textContent.toLowerCase().includes(kw)) ? '' : 'none';
+        });
+    }
+
+    // ── 메시지 전송 ────────────────────────────────────────────────
+    function quickMsg(text) { document.getElementById('msg-input').value = text; document.getElementById('msg-input').focus(); }
+
+    function stopGeneration() {
+        if (abortController) { abortController.abort(); abortController = null; }
+        isLoading = false;
+        document.getElementById('send-btn').disabled = false;
+        document.getElementById('stop-btn').style.display = 'none';
+        toast('⏹ 응답 중지됨');
+    }
+
+    async function sendMsg() {
+        if (isLoading) return;
+        const input = document.getElementById('msg-input');
+        const text  = input.value.trim(); if (!text) return;
+        const welcome = document.getElementById('welcome'); if (welcome) welcome.remove();
+        const chat = chats.find(c => c.id === currentChatId);
+
+        // 채팅 제목 자동 설정
+        if (chat && chat.title === '새 채팅') {
+            chat.title = text.length > 20 ? text.slice(0, 20) + '…' : text;
+            document.getElementById('hdr-title').textContent = chat.title;
+            renderChatList();
+        }
+
+        input.value = ''; input.style.height = 'auto';
+
+        // 사용자 메시지 렌더
+        const uMsg = { sender: currentUser.id, text, isUser: true, hasPdf: !!pdfSessionId };
+        chat.messages.push(uMsg); saveChats();
+        renderMsg(uMsg.sender, uMsg.text, true, false, true);
+
+        const tid = showTyping();
+        isLoading = true;
+        document.getElementById('send-btn').disabled = true;
+        document.getElementById('stop-btn').style.display = 'flex';
+        abortController = new AbortController();
+
+        try {
+            // session_id가 있으면 /chat-pdf, 없으면 /chat
+            let res, d;
+            if (pdfSessionId) {
+                // PDF 세션 기반 질문
+                res = await fetch(API + '/chat-pdf', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: abortController.signal,
+                    body: JSON.stringify({
+                        session_id:    pdfSessionId,
+                        message:       text,
+                        system_prompt: systemPrompt,
+                    })
+                });
+            } else {
+                // 일반 질문
+                res = await fetch(API + '/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: abortController.signal,
+                    body: JSON.stringify({
+                        message:       text,
+                        use_rag:       false,
+                        system_prompt: systemPrompt,
+                    })
+                });
+            }
+
+            removeTyping(tid);
+
+            if (res.ok) {
+                d = await res.json();
+                const reply = d.reply;
+                const aMsg  = { sender: 'AI 어시스턴트', text: reply, isUser: false, hasPdf: !!pdfSessionId };
+                chat.messages.push(aMsg); saveChats();
+                renderMsg(aMsg.sender, aMsg.text, false, !!pdfSessionId, true);
+            } else {
+                renderMsg('AI 어시스턴트', '⚠️ 서버 오류가 발생했습니다.', false, false, true);
+            }
+        } catch (err) {
+            removeTyping(tid);
+            if (err.name === 'AbortError') {
+                renderMsg('AI 어시스턴트', '⏹ 응답이 중지되었습니다.', false, false, true);
+            } else {
+                renderMsg('AI 어시스턴트', '⚠️ 서버에 연결할 수 없습니다.\n' + API + ' 확인하세요.', false, false, true);
+            }
+        }
+
+        isLoading = false;
+        document.getElementById('send-btn').disabled = false;
+        document.getElementById('stop-btn').style.display = 'none';
+        abortController = null;
+        input.focus();
+    }
+
+    // ── 렌더 ──────────────────────────────────────────────────────
+    function renderMsg(sender, text, isUser, hasPdf, scroll) {
+        const msgs = document.getElementById('messages');
+        const g    = document.createElement('div'); g.className = 'msg-group';
+        const badge = (!isUser && hasPdf) ? '<div class="msg-badge">📄 PDF 기반 답변</div>' : '';
+        g.innerHTML = `
+            <div class="msg-meta">
+                <span class="msg-sender ${isUser ? '' : 'ai'}">${isUser ? sender : '🤖 ' + sender}</span>
+                <span class="msg-time">${now()}</span>
+                <button class="copy-btn" onclick="copyMsg(this)">복사</button>
+            </div>
+            ${badge}
+            <div class="msg-text ${isUser ? 'user' : ''}">${esc(text)}</div>`;
+        msgs.appendChild(g);
+        if (scroll) msgs.scrollTop = msgs.scrollHeight;
+    }
+
+    function copyMsg(btn) {
+        const text = btn.closest('.msg-group').querySelector('.msg-text').innerText;
+        navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = '✅'; setTimeout(() => btn.textContent = '복사', 1500);
+        });
+    }
+
+    function showTyping() {
+        const msgs = document.getElementById('messages');
+        const id   = 'tp' + Date.now();
+        const el   = document.createElement('div');
+        el.id = id; el.className = 'typing';
+        el.innerHTML = `<span style="color:var(--accent);font-size:13px">🤖 AI 어시스턴트</span>
+            <div class="dots"><span></span><span></span><span></span></div>`;
+        msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight; return id;
+    }
+    function removeTyping(id) { document.getElementById(id)?.remove(); }
+
+    // ── textarea 자동 높이 ─────────────────────────────────────────
+    const ta = document.getElementById('msg-input');
+    ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'; });
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
+</script>
+</body>
+</html>
