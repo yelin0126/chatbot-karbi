@@ -45,6 +45,7 @@ LOCAL_BACKEND_NAME = "local_hf"
 OLLAMA_BACKEND_NAME = "ollama"
 
 _LOCAL_RUNTIME: Optional[dict[str, Any]] = None
+_CJK_BAD_TOKEN_IDS: Optional[list] = None
 
 
 def _dependency_available(name: str) -> bool:
@@ -138,11 +139,13 @@ def _resolve_local_base_model(adapter_path: Path) -> str:
 
 
 def _build_local_generation_config(model, tokenizer, temperature: Optional[float], max_tokens: Optional[int]):
+    global _CJK_BAD_TOKEN_IDS
+
     generation_config = copy.deepcopy(model.generation_config)
     generation_config.max_new_tokens = max_tokens or LLM_MAX_TOKENS
     generation_config.do_sample = (temperature if temperature is not None else LLM_TEMPERATURE) > 0
-    generation_config.repetition_penalty = 1.1
-    generation_config.no_repeat_ngram_size = 4
+    generation_config.repetition_penalty = 1.15
+    generation_config.no_repeat_ngram_size = 5
     generation_config.pad_token_id = tokenizer.pad_token_id
     generation_config.eos_token_id = tokenizer.eos_token_id
     if generation_config.do_sample:
@@ -153,6 +156,22 @@ def _build_local_generation_config(model, tokenizer, temperature: Optional[float
         generation_config.top_p = None
         if hasattr(generation_config, "top_k"):
             generation_config.top_k = None
+
+    # Suppress Chinese character tokens to prevent language drift.
+    # Builds the list once and caches it for all subsequent calls.
+    if _CJK_BAD_TOKEN_IDS is None:
+        bad_ids = []
+        for token_id in range(tokenizer.vocab_size):
+            decoded = tokenizer.decode([token_id])
+            # CJK Unified Ideographs (U+4E00–U+9FFF) — main Chinese char block
+            if any("\u4e00" <= ch <= "\u9fff" for ch in decoded):
+                bad_ids.append(token_id)
+        _CJK_BAD_TOKEN_IDS = bad_ids
+        logger.info("Built CJK suppression list: %d token IDs banned", len(bad_ids))
+
+    if _CJK_BAD_TOKEN_IDS:
+        generation_config.suppress_tokens = _CJK_BAD_TOKEN_IDS
+
     return generation_config
 
 
@@ -252,9 +271,11 @@ def _encode_local_prompt(tokenizer, rendered_prompt: str, max_input_tokens: int)
     if seq_len <= max_input_tokens:
         return encoded
 
-    # Preserve the instruction prefix and the most recent context/user message.
-    head_tokens = min(512, max_input_tokens // 4)
-    tail_tokens = max_input_tokens - head_tokens
+    # Smart trimming: preserve system instructions (head) AND document context +
+    # user question (tail).  The middle section is typically conversation history,
+    # which is least critical for answer quality.
+    head_tokens = min(768, max_input_tokens // 3)   # system prompt + instructions
+    tail_tokens = max_input_tokens - head_tokens      # doc context + user question
     trimmed = {}
     for key, value in encoded.items():
         trimmed[key] = torch.cat(

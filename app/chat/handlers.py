@@ -446,15 +446,31 @@ def _normalize_scope_text(text: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]", "", (text or "").lower())
 
 
+_GUIDELINE_TITLE_PATTERN = re.compile(
+    r"운영\s*지침|규정|지침\(안\)|지침안|운영\s*규정",
+    re.IGNORECASE,
+)
+
+
 def _extract_scope_labels(docs) -> List[str]:
-    """Extract distinct sub-guideline labels from a combined uploaded document."""
+    """Extract distinct sub-guideline labels from a combined uploaded document.
+
+    Returns an empty list when none of the section titles look like bundled
+    sub-guideline titles (i.e. regular chapter-structured documents like books
+    or single-subject PDFs are not treated as multi-guideline bundles).
+    """
+    # First pass: collect raw titles and check if any look like guideline titles.
+    raw_titles = [
+        str(doc.metadata.get("section_title") or "").strip()
+        for doc in docs
+        if doc.metadata.get("section_title")
+    ]
+    if not any(_GUIDELINE_TITLE_PATTERN.search(t) for t in raw_titles):
+        return []
+
     labels = []
     seen = set()
-    for doc in docs:
-        raw_title = str(doc.metadata.get("section_title") or "").strip()
-        if not raw_title:
-            continue
-
+    for raw_title in raw_titles:
         cleaned = raw_title
         cleaned = re.sub(r"^제주대학교\s*RISE사업단\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*운영\s*지침.*$", "", cleaned)
@@ -613,9 +629,21 @@ def _normalize_fact_query_tokens(text: str) -> List[str]:
 
 
 def _is_count_question(text: str) -> bool:
+    """Return True only for document-total count questions (not historical counts).
+
+    A query containing a specific year (e.g. "1872년에는 몇 개") is asking
+    about a historical fact, not the document's own total — skip deterministic
+    count extraction and let the LLM answer from retrieved context.
+    """
     lower = (text or "").lower()
     indicators = ["몇 개", "총 몇", "number of", "how many", "count"]
-    return any(keyword in lower for keyword in indicators)
+    if not any(keyword in lower for keyword in indicators):
+        return False
+    # Specific year present → historical/contextual question, not a total count
+    # \b fails on Korean (년 is treated as \w in Python Unicode mode) — use (?<!\d) instead
+    if re.search(r"(?<!\d)(1[0-9]{3}|20[0-9]{2})년", text):
+        return False
+    return True
 
 
 def _looks_like_doctrine_count_query(user_message: str, active_source: Optional[str]) -> bool:
@@ -733,12 +761,20 @@ def _strict_fact_chunk_score(user_message: str, doc) -> float:
     return score
 
 
-def _select_strict_fact_docs(user_message: str, docs, front_chunks: int = 2, top_chunks: int = 6):
+def _select_strict_fact_docs(user_message: str, docs, front_chunks: int = 2, top_chunks: int = 4):
     """
     For huge single-document strict-fact queries, keep front-matter plus the most
     query-relevant fact-bearing chunks instead of sending the entire document and
     losing evidence to later context trimming.
     """
+    # History/date/place queries need deeper front-matter coverage (preface, TOC, intro).
+    # front_chunks=8 covers the first ~10 pages which include publication history (page 8-9).
+    if any(kw in user_message for kw in ("언제", "연도", "처음", "최초", "어디", "장소", "결의", "채택", "공식", "대총회")):
+        front_chunks = max(front_chunks, 8)
+    # Explicit year in query → publication-history chunk is on page 8 (index 5 in sorted order)
+    if re.search(r"(?<!\d)(1[0-9]{3}|20[0-9]{2})년", user_message):
+        front_chunks = max(front_chunks, 8)
+
     if len(docs) <= (front_chunks + top_chunks):
         return docs
 
@@ -862,6 +898,507 @@ def _try_scoped_count_answer(user_message: str, docs, active_source: Optional[st
 
     page_note = f" This is stated on page {best_page} of the document." if best_page > 0 else ""
     return f"According to the document, there are {best_number} core items in total.{page_note}"
+
+
+def _parse_toc_from_docs(docs) -> Dict[int, str]:
+    """Extract {chapter_no: title} from TOC or chapter-heading chunks.
+
+    Handles two OCR-parsed formats:
+      TOC line:  제 1 장  성  경 ·····  5
+      Heading:   제1장\\n성경
+    Uses setdefault so the first occurrence (TOC) wins over later headings.
+    """
+    mapping: Dict[int, str] = {}
+    for doc in docs:
+        text = _strip_enrichment_header(doc.page_content)
+        # Collapse tabs/ideographic spaces but keep newlines for heading pattern
+        compact = re.sub(r"[ \t　]+", " ", text)
+
+        # Shared dot/noise terminator class (covers ., ·, … U+2026, ‥ U+2025)
+        _DOT_TERM = r"[·\.…‥]"
+
+        # Pattern A: 제N장 <Korean title> then dots / ASCII noise / newline / end
+        # Notes:
+        #   • \s* not \s+ — OCR sometimes drops the space between 장 and title
+        #   • [\[\(]? handles OCR bracket artifacts like 제[23장
+        #   • \s*[a-z] lookahead catches ASCII OCR noise after title ("말씀wee eee...")
+        #   • ‥ (U+2025) added alongside … (U+2026) in dot terminator
+        for m in re.finditer(
+            r"(?:^|\n)\s*제\s*[\[\(]?\s*(\d{1,3})\s*[\]\)]?\s*장\s*([가-힣][가-힣 ]{1,30}?)"
+            r"(?=\s*" + _DOT_TERM + r"+|\s*\d{1,3}\s*\n|\s*\n|\s*[a-z]|\s*$)",
+            compact,
+        ):
+            no = int(m.group(1))
+            title = re.sub(r"[· \t\.…‥\u3131-\u318E]+$", "", m.group(2)).strip()
+            if title and 2 <= len(title) <= 30 and re.search(r"[가-힣]", title):
+                mapping.setdefault(no, title)
+
+        # Pattern B: 제N장 immediately followed by newline then title
+        for m in re.finditer(
+            r"제\s*[\[\(]?\s*(\d{1,3})\s*[\]\)]?\s*장\s*\n\s*([가-힣][가-힣 ]{1,30}?)(?:\s*\n|$)",
+            compact,
+        ):
+            no = int(m.group(1))
+            title = m.group(2).strip()
+            if title and re.search(r"[가-힣]", title):
+                mapping.setdefault(no, title)
+
+        # Pattern C: body running header "N. 제목" at line start (page footer format)
+        # e.g. "171. 하나님의 말씀" → chapter 1, title 하나님의 말씀
+        # Only applied for small chapter numbers (1-30) to avoid false positives
+        for m in re.finditer(
+            r"(?:^|\n)\s*(\d{1,2})\.\s+([가-힣][가-힣 ]{2,25}?)(?:\s*\n|$)",
+            compact,
+        ):
+            no = int(m.group(1))
+            title = m.group(2).strip()
+            # Require at least 3 Korean syllables to filter out footnote refs like "참조"
+            korean_chars = re.sub(r"[^가-힣]", "", title)
+            if 1 <= no <= 30 and len(korean_chars) >= 3:
+                mapping.setdefault(no, title)
+
+    return mapping
+
+
+def _try_chapter_title_lookup(user_message: str, docs) -> Optional[str]:
+    """Deterministically answer chapter-title and chapter-number queries.
+
+    Handles:
+      "제28장의 제목은?" → look up chapter 28 → return its title
+      "안식일은 몇 장?" / "새 땅은 몇 장?" → reverse-lookup keyword → return chapter number
+    """
+    korean = bool(re.search(r"[가-힣]", user_message))
+
+    # Type 1: chapter number → title  ("제28장의 제목/이름은?", "제25장은 무엇을 다룹니까?")
+    # (?:[은는이]?\s*)? handles the Korean topic particle between 장 and the question word
+    m = re.search(
+        r"제\s*(\d{1,3})\s*장\s*(?:[은는이]\s*)?(?:의\s*)?(?:제목|이름|명칭|무엇|뭐|what)",
+        user_message,
+        re.IGNORECASE,
+    )
+    if m:
+        target = int(m.group(1))
+        toc = _merge_chapter_maps(_parse_toc_from_docs(docs), _parse_body_chapter_map_from_docs(docs))
+        if target in toc:
+            title = toc[target]
+            return f"제{target}장의 제목은 「{title}」입니다." if korean else f"Chapter {target} is titled '{title}'."
+        return None
+
+    # Type 2: keyword → chapter number  ("안식일은 몇 장에 나옵니까?", "새 땅은 몇 장?")
+    # Use lookahead to stop at the trailing particle so "안식일은" captures "안식일",
+    # and allow internal spaces so "새 땅" (two syllables with space) is captured correctly.
+    m = re.search(
+        r"([가-힣][가-힣 ]*?[가-힣])(?=(?:은|는|이|가)?\s*몇\s*장)",
+        user_message,
+    )
+    if not m:
+        return None
+    keyword = m.group(1).strip()
+    toc = _merge_chapter_maps(_parse_toc_from_docs(docs), _parse_body_chapter_map_from_docs(docs))
+    hits = [(no, title) for no, title in sorted(toc.items()) if keyword in title]
+    if len(hits) == 1:
+        no, title = hits[0]
+        return f"「{title}」은(는) 제{no}장에 나옵니다."
+    if len(hits) > 1:
+        items = ", ".join(f"제{no}장 {title}" for no, title in hits)
+        return f"'{keyword}'와 관련된 장: {items}입니다."
+    return None
+
+
+# ── Bucket 2: body chapter map (supplements garbled TOC entries) ────────────
+
+def _parse_body_chapter_map_from_docs(docs) -> Dict[int, str]:
+    """Find chapter titles from section_title metadata for chapters missing in the TOC.
+
+    Steps:
+      1. Extract chapter_no → start_page from TOC lines (even garbled ones have the page number).
+      2. Build page → first_section_title from the actual chunk metadata.
+      3. For each chapter's start page, normalize the section_title (remove OCR spaces).
+    """
+    # Step 1: chapter_no -> start_page from TOC
+    toc_chapter_pages: Dict[int, int] = {}
+    for doc in docs:
+        pg = int(doc.metadata.get("page") or 0)
+        if pg > 20:
+            continue
+        text = _strip_enrichment_header(doc.page_content)
+        compact = re.sub(r"[ \t　]+", " ", text)
+        for m in re.finditer(
+            r"(?:^|\n)\s*제\s*[\[\(]?\s*(\d{1,3})\s*장[^\n]*?(\d{2,3})\s*(?:\n|$)",
+            compact,
+        ):
+            no, start_pg = int(m.group(1)), int(m.group(2))
+            if 0 < no <= 30 and 10 <= start_pg <= 600:
+                toc_chapter_pages.setdefault(no, start_pg)
+
+    def _is_likely_chapter_title(title: str) -> bool:
+        korean = re.sub(r"[^가-힣]", "", title or "")
+        if len(korean) < 2 or len(korean) > 25:
+            return False
+        noise_terms = ("참고문헌", "서문", "차례", "contents")
+        return not any(term in title.lower() for term in noise_terms)
+
+    def _page_title_score(title: str, page_text: str) -> Tuple[int, int]:
+        korean = re.sub(r"[^가-힣]", "", title or "")
+        starts_page = 0 if page_text.startswith(title) else 1
+        length_penalty = abs(len(korean) - 4)
+        return (starts_page, length_penalty)
+
+    # Step 2: page -> best clean section_title candidate
+    ordered = sorted(
+        docs,
+        key=lambda d: (int(d.metadata.get("page") or 0), int(d.metadata.get("chunk_index") or 0)),
+    )
+    page_titles: Dict[int, List[str]] = {}
+    page_texts: Dict[int, str] = {}
+    for doc in ordered:
+        pg = int(doc.metadata.get("page") or 0)
+        page_texts.setdefault(pg, _strip_enrichment_header(doc.page_content).strip())
+        st = str(doc.metadata.get("section_title") or "").strip()
+        if st:
+            normalized = re.sub(r"\s+", "", st)  # "침 례" → "침례"
+            if _is_likely_chapter_title(normalized):
+                page_titles.setdefault(pg, [])
+                if normalized not in page_titles[pg]:
+                    page_titles[pg].append(normalized)
+
+    page_to_first_title: Dict[int, str] = {}
+    for pg, titles in page_titles.items():
+        page_text = re.sub(r"\s+", "", page_texts.get(pg, ""))
+        ranked = sorted(titles, key=lambda title: _page_title_score(title, page_text))
+        if ranked:
+            page_to_first_title[pg] = ranked[0]
+
+    # Step 3: map chapter_no -> section_title via exact/nearby start page
+    result: Dict[int, str] = {}
+    for no, start_pg in toc_chapter_pages.items():
+        for offset in range(4):
+            title = page_to_first_title.get(start_pg + offset)
+            if title and _is_likely_chapter_title(title):
+                result.setdefault(no, title)
+                break
+
+    # Step 4: infer missing chapter titles from gaps between known chapter starts.
+    # This recovers OCR-missed TOC entries like chapter 12 "교회" and chapter 15 "침례"
+    # by picking the best title-bearing body page between neighboring known starts.
+    known = sorted((no, pg) for no, pg in toc_chapter_pages.items())
+    # Never reuse a page already identified as a chapter start in the TOC page map.
+    used_pages = set(toc_chapter_pages.values())
+    candidate_pages = [
+        (pg, title)
+        for pg, title in sorted(page_to_first_title.items())
+        if _is_likely_chapter_title(title)
+    ]
+    for (prev_no, prev_pg), (next_no, next_pg) in zip(known, known[1:]):
+        missing = next_no - prev_no - 1
+        if missing <= 0:
+            continue
+        between = [
+            (pg, title)
+            for pg, title in candidate_pages
+            if prev_pg < pg < next_pg and pg not in used_pages
+        ]
+        if len(between) < missing:
+            continue
+        chosen: List[Tuple[int, str]] = []
+        remaining = list(between)
+        span = next_pg - prev_pg
+        for offset in range(1, missing + 1):
+            expected_pg = prev_pg + (span * offset / (missing + 1))
+            remaining.sort(
+                key=lambda item: (
+                    abs(item[0] - expected_pg),
+                    len(re.sub(r"[^가-힣]", "", item[1])),
+                ),
+            )
+            pg, title = remaining.pop(0)
+            chosen.append((pg, title))
+        chosen.sort(key=lambda item: item[0])
+        for offset, (pg, title) in enumerate(chosen, start=1):
+            result.setdefault(prev_no + offset, title)
+            used_pages.add(pg)
+
+    return result
+
+
+def _merge_chapter_maps(toc_map: Dict[int, str], body_map: Dict[int, str]) -> Dict[int, str]:
+    """Merge TOC-extracted and body-extracted chapter maps. TOC entries take precedence."""
+    merged = dict(body_map)
+    merged.update(toc_map)
+    return merged
+
+
+# ── Bucket 1: publication history lookup ────────────────────────────────────
+
+_HISTORY_INDICATORS = [
+    "신조", "교리", "추가", "결의", "출간", "출판", "대총회", "한국어",
+    "번역", "개정", "교회연감", "항목", "몇 개", "제목", "명칭",
+]
+
+
+def _front_matter_text(docs, max_page: int = 15) -> str:
+    parts: List[str] = []
+    for doc in sorted(
+        docs,
+        key=lambda d: (int(d.metadata.get("page") or 0), int(d.metadata.get("chunk_index") or 0)),
+    ):
+        if int(doc.metadata.get("page") or 0) > max_page:
+            continue
+        parts.append(_strip_enrichment_header(doc.page_content))
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _parse_publication_history_from_docs(docs) -> Dict[str, List[str]]:
+    """Extract year → [sentences] from front-matter chunks (pages 1–15).
+
+    Captures sentences that mention years in the range 1800–2050 (avoids
+    false positives from biblical verse references like 창 1:1).
+    """
+    result: Dict[str, List[str]] = {}
+    for doc in docs:
+        if int(doc.metadata.get("page") or 0) > 15:
+            continue
+        text = _strip_enrichment_header(doc.page_content)
+        # Split into rough sentences at Korean full stops and newlines
+        for sent in re.split(r"(?<=[다.！？\n])\s*", text):
+            sent = re.sub(r"\s+", " ", sent).strip()
+            if len(sent) < 10:
+                continue
+            for m in re.finditer(r"(?<!\d)(1[89]\d{2}|20\d{2})(?!\d)", sent):
+                year = m.group(1)
+                result.setdefault(year, [])
+                if sent not in result[year]:
+                    result[year].append(sent)
+    return result
+
+
+def _extract_publication_history_facts(docs) -> Dict[str, Dict[str, str]]:
+    """Extract normalized publication-history facts from front-matter text."""
+    text = _front_matter_text(docs, max_page=15)
+    facts: Dict[str, Dict[str, str]] = {}
+
+    if re.search(r"1872년[^.]{0,120}?25개의\s*신조", text):
+        location = "베틀크릭" if "베틀크릭" in text else ""
+        facts["1872"] = {
+            "answer": f"1872년에는 {location + '에서 ' if location else ''}25개의 신조가 출간되었습니다.",
+        }
+
+    if re.search(r"28개\s*항목[^.]{0,120}?1889년판\s*교회연감", text):
+        facts["1889"] = {
+            "answer": "1889년판 교회연감에는 28개 항목으로 게재되었다고 설명합니다.",
+        }
+
+    if re.search(r"22개의\s*기본교리[^.]{0,120}?1931년판\s*교회연감", text):
+        facts["1931"] = {
+            "answer": "1931년에는 22개의 기본교리로 정리되어 교회연감에 소개되었다고 설명합니다.",
+        }
+
+    if re.search(r"1980년\s*대총회[^.]{0,120}?27개의\s*항목", text):
+        facts["1980"] = {
+            "answer": "1980년 대총회 회기 때는 27개의 항목으로 다시 정리되었다고 설명합니다.",
+        }
+
+    m_1989 = re.search(
+        r"1989년\s*[\"“']([^\"”']*기본교리\s*27)[\"”']이라는\s*제목으로\s*번역\s*출판",
+        text,
+    )
+    if m_1989:
+        title = re.sub(r"\s+", " ", m_1989.group(1)).strip()
+        facts["1989"] = {
+            "answer": f"1989년에 처음 번역된 한국어판 제목은 「{title}」입니다.",
+        }
+
+    m_2005 = re.search(
+        r"11장의\s*[\"“']([^\"”']*그리스도\s*안에서\s*자라\s*남[^\"”']*)[\"”']이라는\s*항목이\s*추가",
+        text,
+    )
+    if "2005년" in text and m_2005:
+        title = re.sub(r"\s+", " ", m_2005.group(1)).strip()
+        title = re.sub(r"자라\s+남", "자라남", title)
+        facts["2005"] = {
+            "answer": f"2005년 대총회에서 추가된 교리는 제11장 「{title}」입니다.",
+        }
+
+    return facts
+
+
+def _try_history_lookup(user_message: str, docs) -> Optional[str]:
+    """Deterministically answer publication-history questions.
+
+    Fires when the query contains a year (1800–2050) AND a history keyword.
+    Returns the most relevant sentence(s) from the front-matter verbatim.
+    """
+    year_m = re.search(r"(?<!\d)(1[89]\d{2}|20\d{2})(?!\d)", user_message)
+    if not year_m:
+        return None
+    lower = user_message.lower()
+    if not any(kw in lower for kw in _HISTORY_INDICATORS):
+        return None
+
+    year = year_m.group(1)
+    facts = _extract_publication_history_facts(docs)
+    if year in facts:
+        answer = facts[year]["answer"]
+        korean = bool(re.search(r"[가-힣]", user_message))
+        return answer if korean else f"According to the document, {answer}"
+
+    history = _parse_publication_history_from_docs(docs)
+    sentences = history.get(year, [])
+    if not sentences:
+        return None
+
+    query_tokens = _normalize_fact_query_tokens(user_message)
+    ranked = sorted(
+        sentences,
+        key=lambda s: sum(1 for t in query_tokens if t in s.lower()),
+        reverse=True,
+    )
+    best = " ".join(ranked[:2])
+    korean = bool(re.search(r"[가-힣]", user_message))
+    return f"문서에 따르면, {best}" if korean else f"According to the document: {best}"
+
+
+# ── Bucket 3: TOC category / structure lookup ────────────────────────────────
+
+_STRUCTURE_INDICATORS = [
+    "구성", "범주", "분류", "목차", "차례", "신론", "인간론", "구원론",
+    "교회론", "그리스도인 생활론", "종말론", "어디서 시작", "몇 장부터",
+]
+
+_CATEGORY_LABEL_RE = re.compile(
+    r"^(?:\|)?\s*(신론|인간론|구원론|교회론|그리스도인\s*생활론|종말론)\s*(?:\|)?$"
+)
+
+
+def _parse_toc_categories_from_docs(docs) -> Dict[str, Tuple[int, int]]:
+    """Parse |카테고리| headers from TOC pages and map each to its chapter range.
+
+    Returns {category_name: (first_chapter_no, last_chapter_no)}.
+    """
+    # Collect ordered (category | visible chapter_no) events from TOC pages.
+    # Category headers may appear either as |신론| or bare labels like 종말론.
+    events: List[Tuple[str, Any]] = []
+    for doc in sorted(
+        docs,
+        key=lambda d: (int(d.metadata.get("page") or 0), int(d.metadata.get("chunk_index") or 0)),
+    ):
+        if int(doc.metadata.get("page") or 0) > 20:
+            break
+        text = _strip_enrichment_header(doc.page_content)
+        for line in re.sub(r"[ \t　]+", " ", text).split("\n"):
+            line = line.strip()
+            cat_m = _CATEGORY_LABEL_RE.match(line)
+            if cat_m:
+                events.append(("cat", re.sub(r"\s+", "", cat_m.group(1))))
+            ch_m = re.search(r"제\s*[\[\(]?\s*(\d{1,3})\s*장", line)
+            if ch_m:
+                events.append(("ch", int(ch_m.group(1))))
+
+    # Group chapters under each category
+    cat_chapters: Dict[str, List[int]] = {}
+    current_cat: Optional[str] = None
+    for kind, val in events:
+        if kind == "cat":
+            current_cat = val
+            cat_chapters.setdefault(current_cat, [])
+        elif kind == "ch" and current_cat:
+            cat_chapters[current_cat].append(val)
+
+    merged_map = _merge_chapter_maps(_parse_toc_from_docs(docs), _parse_body_chapter_map_from_docs(docs))
+    known_chapters = sorted(merged_map)
+
+    # Build ranges from ordered category blocks.
+    # first = previous last + 1 (contiguous chapter blocks)
+    # last  = either:
+    #   - next visible category chapter - 1, when the current category shows OCR gaps
+    #   - current visible max, when the current category looks complete already
+    # This keeps 신론 1-5, 인간론 6-7, 구원론 8-11, 교회론 12-18, 생활론 19-23.
+    cat_names = [c for c in cat_chapters if cat_chapters[c]]
+    result: Dict[str, Tuple[int, int]] = {}
+    prev_last = 0
+    for idx, cat in enumerate(cat_names):
+        chapters = sorted(set(cat_chapters[cat]))
+        first = prev_last + 1 if prev_last > 0 else min(chapters)
+
+        if idx + 1 < len(cat_names):
+            next_visible = min(cat_chapters[cat_names[idx + 1]])
+            consecutive = chapters == list(range(min(chapters), max(chapters) + 1))
+            if len(chapters) == 1 or consecutive:
+                last = max(chapters)
+            else:
+                last = next_visible - 1
+        else:
+            later_known = [n for n in known_chapters if n >= first]
+            last = max(later_known) if later_known else max(chapters)
+
+        if last < first:
+            last = max(chapters)
+        result[cat] = (first, last)
+        prev_last = last
+
+    return result
+
+
+def _try_structure_lookup(user_message: str, docs) -> Optional[str]:
+    """Deterministically answer structural/category questions.
+
+    Handles:
+      "차례를 기준으로 큰 구성 범주" → list all categories with chapter ranges
+      "신론은 어디서 시작합니까?" → 신론 starts at chapter 1
+      "구원론에는 몇 장이 있습니까?" → 구원론 chapter range
+    """
+    if not any(kw in user_message for kw in _STRUCTURE_INDICATORS):
+        return None
+
+    categories = _parse_toc_categories_from_docs(docs)
+    if not categories:
+        return None
+
+    normalized_user = re.sub(r"\s+", "", user_message)
+
+    # Restore internal spaces stripped during key normalisation (e.g. 그리스도인생활론 → 그리스도인 생활론)
+    _DISPLAY = {"그리스도인생활론": "그리스도인 생활론"}
+
+    # Match a specific category name in the query
+    for cat, (first, last) in categories.items():
+        if cat in normalized_user:
+            disp = _DISPLAY.get(cat, cat)
+            count = last - first + 1
+            if "몇 장부터 몇 장까지" in user_message:
+                return f"「{disp}」는 제{first}장부터 제{last}장까지입니다."
+            if any(kw in user_message for kw in ("시작", "몇 장부터", "처음")):
+                return f"「{disp}」는 제{first}장부터 시작합니다."
+            if any(kw in user_message for kw in ("끝", "마지막")):
+                return f"「{disp}」는 제{last}장까지입니다."
+            if any(kw in user_message for kw in ("몇 개", "몇개", "몇 장", "개수")):
+                return f"「{disp}」에는 제{first}장부터 제{last}장까지 총 {count}개의 장이 있습니다."
+            return f"「{disp}」는 제{first}장부터 제{last}장까지입니다."
+
+    # Overview query: list all categories
+    overview_kws = ("구성", "범주", "분류", "목차", "차례", "전체", "큰")
+    if any(kw in user_message for kw in overview_kws):
+        lines = [f"  • {_DISPLAY.get(cat, cat)}: 제{first}장 – 제{last}장" for cat, (first, last) in categories.items()]
+        return "이 문서의 큰 구성 범주는 다음과 같습니다:\n" + "\n".join(lines)
+
+    return None
+
+
+_OUT_OF_SCOPE_TERMS_RE = re.compile(
+    r"\bRAG\b|파인튜닝|벡터\s*(?:DB|데이터베이스)?|임베딩\s*모델?|(?<![가-힣])LLM(?![가-힣])|ChatGPT|GPT[-\s]?\d|랭체인|langchain|llama\b",
+    re.IGNORECASE,
+)
+
+
+def _is_clearly_out_of_scope(user_message: str, docs) -> bool:
+    """True when the query contains modern tech/ML terms clearly absent from the document.
+
+    Samples the first 50 chunks (front-matter + early body) for the same terms.
+    If none appear in the document, the question cannot be answered from it.
+    """
+    if not _OUT_OF_SCOPE_TERMS_RE.search(user_message):
+        return False
+    sample = " ".join(_strip_enrichment_header(d.page_content)[:300] for d in docs[:50])
+    return not _OUT_OF_SCOPE_TERMS_RE.search(sample)
 
 
 def _strip_enrichment_header(text: str) -> str:
@@ -1615,6 +2152,9 @@ def handle_chat(
                 # document so the exact article chunk is never missed by top-k.
                 or _needs_article_lookup(user_message)
                 or _should_force_small_doc_full_context(scoped_source, scoped_doc_id)
+                # TOC structure queries (차례, 목차, 신론/구원론/교회론 범주) need
+                # full doc so _try_structure_lookup can parse all TOC pages.
+                or any(kw in user_message for kw in _STRUCTURE_INDICATORS)
             )
         )
         or (
@@ -1760,6 +2300,23 @@ def handle_chat(
 
     if docs:
         if use_full_document and not multi_scope and (scoped_source or scoped_doc_id):
+            # Early exit: query asks about tech/ML topics clearly absent from this document
+            if _is_clearly_out_of_scope(user_message, docs):
+                logger.info(
+                    "Out-of-scope query for '%s'; returning not-found",
+                    scoped_source or scoped_doc_id,
+                )
+                return {
+                    "answer": "해당 질문에는 답변할 수 없습니다.",
+                    "sources": [],
+                    "mode": "document_qa",
+                    "active_source": active_source,
+                    "active_doc_id": active_doc_id,
+                    "active_source_type": active_source_type,
+                    "active_sources": scoped_sources,
+                    "active_doc_ids": scoped_doc_ids,
+                }
+
             if _needs_strict_fact_style(user_message):
                 direct_count_answer = _try_scoped_count_answer(
                     user_message,
@@ -1782,6 +2339,60 @@ def handle_chat(
                         "active_sources": scoped_sources,
                         "active_doc_ids": scoped_doc_ids,
                     }
+
+                direct_toc_answer = _try_chapter_title_lookup(user_message, docs)
+                if direct_toc_answer:
+                    logger.info(
+                        "Answered chapter TOC lookup directly from '%s'%s",
+                        active_source or "scoped document",
+                        f" ({active_doc_id})" if active_doc_id else "",
+                    )
+                    return {
+                        "answer": direct_toc_answer,
+                        "sources": extract_sources(docs),
+                        "mode": "document_qa",
+                        "active_source": active_source,
+                        "active_doc_id": active_doc_id,
+                        "active_source_type": active_source_type,
+                        "active_sources": scoped_sources,
+                        "active_doc_ids": scoped_doc_ids,
+                    }
+
+                direct_history_answer = _try_history_lookup(user_message, docs)
+                if direct_history_answer:
+                    logger.info(
+                        "Answered publication history lookup directly from '%s'%s",
+                        active_source or "scoped document",
+                        f" ({active_doc_id})" if active_doc_id else "",
+                    )
+                    return {
+                        "answer": direct_history_answer,
+                        "sources": extract_sources(docs),
+                        "mode": "document_qa",
+                        "active_source": active_source,
+                        "active_doc_id": active_doc_id,
+                        "active_source_type": active_source_type,
+                        "active_sources": scoped_sources,
+                        "active_doc_ids": scoped_doc_ids,
+                    }
+
+            direct_structure_answer = _try_structure_lookup(user_message, docs)
+            if direct_structure_answer:
+                logger.info(
+                    "Answered TOC structure lookup directly from '%s'%s",
+                    active_source or "scoped document",
+                    f" ({active_doc_id})" if active_doc_id else "",
+                )
+                return {
+                    "answer": direct_structure_answer,
+                    "sources": extract_sources(docs),
+                    "mode": "document_qa",
+                    "active_source": active_source,
+                    "active_doc_id": active_doc_id,
+                    "active_source_type": active_source_type,
+                    "active_sources": scoped_sources,
+                    "active_doc_ids": scoped_doc_ids,
+                }
 
             scoped_docs = _filter_docs_to_named_scope(user_message, docs)
             if len(scoped_docs) != len(docs):

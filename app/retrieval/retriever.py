@@ -245,7 +245,7 @@ def _estimate_confidence(
     return min(confidence, 1.0)
 
 
-def format_context(docs: List[Document]) -> str:
+def format_context(docs: List[Document], max_chars_per_chunk: int = 900) -> str:
     """
     Format retrieved documents into a context string for the LLM prompt.
 
@@ -253,6 +253,10 @@ def format_context(docs: List[Document]) -> str:
     for better embedding) since this function adds its own formatted header.
 
     Format: [Doc: {source} | Page: {page} | Section: {section} | Lang: {lang}]
+
+    max_chars_per_chunk caps each chunk's text so 4-5 chunks don't blow the
+    LLM's token budget before the prompt is even assembled. Truncation prefers
+    a sentence boundary (Korean '다. ' / '. ') within the last 120 chars.
     """
     if not docs:
         return ""
@@ -273,6 +277,19 @@ def format_context(docs: List[Document]) -> str:
 
         # Strip enrichment header from content to avoid duplication
         content = _header_re.sub('', d.page_content).strip()
+
+        # Truncate to token budget — prefer clean sentence boundary
+        if len(content) > max_chars_per_chunk:
+            window = content[max_chars_per_chunk - 120 : max_chars_per_chunk]
+            cut = -1
+            for sep in ("다. ", "요. ", ". ", "? ", "! "):
+                pos = window.rfind(sep)
+                if pos != -1:
+                    cut = max_chars_per_chunk - 120 + pos + len(sep)
+                    break
+            if cut == -1:
+                cut = max_chars_per_chunk
+            content = content[:cut].rstrip() + " ..."
 
         parts.append(f"{header}\n{content}")
 

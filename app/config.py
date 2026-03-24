@@ -46,9 +46,9 @@ LOCAL_LLM_ADAPTER_PATH = os.getenv(
 LOCAL_LLM_BASE_MODEL = os.getenv("LOCAL_LLM_BASE_MODEL", "").strip()
 LOCAL_LLM_LOCAL_FILES_ONLY = os.getenv("LOCAL_LLM_LOCAL_FILES_ONLY", "true").lower() == "true"
 LOCAL_LLM_LOAD_IN_4BIT = os.getenv("LOCAL_LLM_LOAD_IN_4BIT", "true").lower() == "true"
-LOCAL_LLM_MAX_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_MAX_INPUT_TOKENS", "3072"))
-LOCAL_LLM_OOM_RETRY_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_INPUT_TOKENS", "2048"))
-LOCAL_LLM_OOM_RETRY_MAX_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_MAX_TOKENS", "256"))
+LOCAL_LLM_MAX_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_MAX_INPUT_TOKENS", "4096"))
+LOCAL_LLM_OOM_RETRY_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_INPUT_TOKENS", "3072"))
+LOCAL_LLM_OOM_RETRY_MAX_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_MAX_TOKENS", "512"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))
@@ -68,10 +68,10 @@ EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", _detect_device())
 LOCAL_LLM_DEVICE = os.getenv("LOCAL_LLM_DEVICE", _detect_device())
 
 # ── Reranker (NEW — not in original) ──────────────────────────────────
-RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "false").lower() == "true"
-LIVE_RERANKER_ENABLED = os.getenv("LIVE_RERANKER_ENABLED", "false").lower() == "true"
+RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
+LIVE_RERANKER_ENABLED = os.getenv("LIVE_RERANKER_ENABLED", "true").lower() == "true"
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-RERANKER_TOP_N = int(os.getenv("RERANKER_TOP_N", "3"))
+RERANKER_TOP_N = int(os.getenv("RERANKER_TOP_N", "5"))
 RERANKER_DEVICE = os.getenv(
     "RERANKER_DEVICE",
     "cuda" if EMBEDDING_DEVICE == "cuda" else "cpu",
@@ -82,7 +82,7 @@ RERANKER_USE_FP16 = os.getenv(
 ).lower() == "true"
 
 # ── Retrieval ─────────────────────────────────────────────────────────
-VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "6"))
+VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "10"))
 GLOBAL_MIN_RELEVANCE_SCORE = float(os.getenv("GLOBAL_MIN_RELEVANCE_SCORE", "0.30"))
 DOCUMENT_CONFIDENCE_THRESHOLD = float(os.getenv("DOCUMENT_CONFIDENCE_THRESHOLD", "0.45"))
 SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD = float(
@@ -91,7 +91,7 @@ SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD = float(
 SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS = int(
     os.getenv("SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS", "15")
 )
-STRONG_KEYWORD_CONFIDENCE_FLOOR = float(os.getenv("STRONG_KEYWORD_CONFIDENCE_FLOOR", "0.75"))
+STRONG_KEYWORD_CONFIDENCE_FLOOR = float(os.getenv("STRONG_KEYWORD_CONFIDENCE_FLOOR", "0.65"))
 
 # ── Chunking ──────────────────────────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
