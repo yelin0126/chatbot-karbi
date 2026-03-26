@@ -29,6 +29,44 @@ from app.retrieval.reranker import rerank
 logger = logging.getLogger("tilon.retriever")
 
 RRF_K = 60
+_SCOPED_QUERY_STOPWORDS = {
+    "대해", "대해서", "대해서도", "관련", "관해서", "설명", "설명해", "설명해줘",
+    "말해", "말해줘", "알려", "알려줘", "요약", "요약해", "정리", "정리해",
+    "부분", "내용", "문서", "파일", "업로드", "이", "그", "also", "about",
+    "tell", "explain", "summary", "document", "file",
+}
+
+
+def _document_identity(doc: Document) -> Tuple[Any, ...]:
+    meta = doc.metadata
+    normalized_content = " ".join((doc.page_content or "").split())
+    return (
+        meta.get("doc_id") or meta.get("source"),
+        meta.get("page"),
+        meta.get("chunk_index"),
+        meta.get("chunk_type"),
+        normalized_content,
+    )
+
+
+def _dedupe_documents(docs: List[Document]) -> List[Document]:
+    seen = set()
+    unique_docs: List[Document] = []
+    for doc in docs:
+        key = _document_identity(doc)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_docs.append(doc)
+    return unique_docs
+
+
+def _scoped_query_tokens(query: str) -> set[str]:
+    return {
+        token
+        for token in tokenize_text(query)
+        if len(token) >= 3 and token not in _SCOPED_QUERY_STOPWORDS
+    }
 
 
 @dataclass
@@ -93,7 +131,10 @@ def retrieve(
     )
 
     merged = _fuse_results(vector_results, keyword_results, limit=fetch_k)
-    docs = [entry["doc"] for entry in merged]
+    if source_filter or doc_id_filter:
+        merged = _prioritize_scoped_matches(query, merged)
+        merged = _filter_scoped_matches(query, merged)
+    docs = _dedupe_documents([entry["doc"] for entry in merged])
 
     scope_parts = []
     if source_filter:
@@ -115,7 +156,7 @@ def retrieve(
     )
 
     if RERANKER_ENABLED and len(docs) > 1:
-        docs = rerank(query, docs)
+        docs = _dedupe_documents(rerank(query, docs))
         logger.info("After reranking: %d documents", len(docs))
     elif docs:
         logger.info("Skipping reranker for %d retrieved document(s)", len(docs))
@@ -189,6 +230,47 @@ def _fuse_results(
         ),
         reverse=True,
     )[:limit]
+
+
+def _prioritize_scoped_matches(
+    query: str,
+    merged: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    query_tokens = _scoped_query_tokens(query)
+    if not query_tokens:
+        return merged
+
+    def _match_score(entry: Dict[str, Any]) -> tuple[int, int, int, float, float, float]:
+        doc_tokens = set(tokenize_text(entry["doc"].page_content))
+        overlap = len(query_tokens & doc_tokens)
+        exactish_overlap = sum(1 for token in query_tokens if token in doc_tokens)
+        return (
+            overlap,
+            exactish_overlap,
+            1 if entry["in_keyword"] else 0,
+            entry["keyword_score"],
+            entry["rrf_score"],
+            entry["vector_score"],
+        )
+
+    return sorted(merged, key=_match_score, reverse=True)
+
+
+def _filter_scoped_matches(
+    query: str,
+    merged: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    query_tokens = _scoped_query_tokens(query)
+    if not query_tokens:
+        return merged
+
+    matched_entries = []
+    for entry in merged:
+        doc_tokens = set(tokenize_text(entry["doc"].page_content))
+        if query_tokens & doc_tokens:
+            matched_entries.append(entry)
+
+    return matched_entries or merged
 
 
 def _has_strong_keyword_hit(
@@ -275,8 +357,10 @@ def format_context(docs: List[Document]) -> str:
 
 def extract_sources(docs: List[Document]) -> List[Dict[str, Any]]:
     """Extract source metadata from documents for API response."""
-    return [
-        {
+    sources: List[Dict[str, Any]] = []
+    seen = set()
+    for d in _dedupe_documents(docs):
+        source = {
             "doc_id": d.metadata.get("doc_id"),
             "source": d.metadata.get("source"),
             "source_type": d.metadata.get("source_type"),
@@ -287,5 +371,14 @@ def extract_sources(docs: List[Document]) -> List[Dict[str, Any]]:
             "chunk_type": d.metadata.get("chunk_type", ""),
             "extraction_method": d.metadata.get("extraction_method"),
         }
-        for d in docs
-    ]
+        key = (
+            source["doc_id"] or source["source"],
+            source["page"],
+            source["chunk_index"],
+            source["chunk_type"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(source)
+    return sources

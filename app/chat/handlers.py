@@ -712,17 +712,19 @@ def handle_chat(
     scoped_source_type = None if _is_smalltalk_query(user_message) else active_source_type
     has_initial_scope = bool(scoped_source or scoped_doc_id or scoped_source_type)
 
+    scope_reset_requested = _is_scope_reset_query(user_message)
     document_intent = (
         _is_document_intent_query(user_message)
         or _is_direct_extraction_query(user_message)
         or _needs_full_document_context(user_message)
         or (has_initial_scope and _is_scope_followup_query(user_message))
+        or (has_initial_scope and not scope_reset_requested)
     )
 
-    if _is_scope_reset_query(user_message):
+    if scope_reset_requested:
         document_intent = False
 
-    # Do not force upload/document scope for general conversation.
+    # Keep explicit chat-level document scope unless the user clearly resets it.
     if not document_intent:
         scoped_source = None
         scoped_doc_id = None

@@ -104,7 +104,6 @@
         .msg-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
         .msg-sender { font-size: 14px; font-weight: 700; }
         .msg-sender.ai { color: var(--accent); }
-        .otter-mini { width: 15px; height: 15px; object-fit: contain; vertical-align: -2px; margin-right: 4px; border-radius: 0; }
         .typing-label { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 13px; }
         .msg-time { font-size: 11px; color: var(--tm); }
         .copy-btn { opacity: 0; font-size: 11px; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg3); color: var(--ts); cursor: pointer; font-family: inherit; }
@@ -121,7 +120,6 @@
         @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-4px); } }
 
         .welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; text-align: center; gap: 10px; }
-        .welcome .wi { width: 112px; height: auto; object-fit: contain; border-radius: 0; border: none; box-shadow: none; margin-bottom: 8px; background: transparent; display: block; }
         .welcome h2 { font-size: 22px; font-weight: 700; color: var(--tp); }
         .welcome p { font-size: 14px; color: var(--ts); max-width: 360px; line-height: 1.6; }
         .quick-btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
@@ -503,7 +501,6 @@
 
         if (chat.messages.length === 0) {
             msgs.innerHTML = `<div class="welcome" id="welcome">
-                <img class="wi" src="/static/otter-welcome.png?v=2" alt="수달 마스코트">
                 <h2>무엇을 도와드릴까요?</h2>
                 <p>업로드 파일이 있으면 참고하고, 일반 질문도 자연스럽게 이어서 답변합니다.</p>
                 <div class="quick-btns">
@@ -819,6 +816,14 @@
                         uploaded_at: Date.now()
                     };
                     upsertDoc(doc);
+
+                    const activeChat = ensureCurrentChat();
+                    if (activeChat) {
+                        activeChat.active_source = doc.source || null;
+                        activeChat.active_doc_id = doc.doc_id || null;
+                        saveChats();
+                    }
+
                     ok += 1;
                     completed += 1;
                     setShelfUploadProgress(completed, files.length, file.name);
@@ -1012,7 +1017,7 @@
         g.className = 'msg-group';
         g.innerHTML = `
             <div class="msg-meta">
-                <span class="msg-sender ${isUser ? '' : 'ai'}">${isUser ? esc(sender) : '<img class="otter-mini" src="/static/otter-mascot.png?v=2" alt="수달">' + esc(sender)}</span>
+                <span class="msg-sender ${isUser ? '' : 'ai'}">${isUser ? esc(sender) : esc(sender)}</span>
                 <span class="msg-time">${now()}</span>
                 <button class="copy-btn" onclick="copyMsg(this)">복사</button>
             </div>
@@ -1035,7 +1040,7 @@
         const el = document.createElement('div');
         el.id = id;
         el.className = 'typing';
-        el.innerHTML = `<span class="typing-label"><img class="otter-mini" src="/static/otter-mascot.png?v=2" alt="수달">틸론AI</span>
+        el.innerHTML = `<span class="typing-label">틸론AI</span>
             <div class="dots"><span></span><span></span><span></span></div>`;
         msgs.appendChild(el);
         msgs.scrollTop = msgs.scrollHeight;

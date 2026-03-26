@@ -9,18 +9,55 @@ import logging
 import math
 import re
 from collections import Counter
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from langchain_core.documents import Document
 
 logger = logging.getLogger("tilon.keyword_index")
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9._-]+|[가-힣]+")
+_KOREAN_PARTICLE_SUFFIXES = (
+    "으로부터", "에서부터", "에게서는", "한테서는", "으로는", "에게서", "한테서",
+    "이라도", "라도", "이라는", "라는", "이라고", "라고", "이랑", "랑", "으로", "에서",
+    "에는", "에도", "에게", "한테", "와는", "과는", "와도", "과도", "부터", "까지",
+    "처럼", "보다", "마저", "조차", "밖에", "마다", "하고", "이며", "이고", "이다",
+    "와", "과", "은", "는", "이", "가", "을", "를", "에", "의", "도", "만", "로",
+)
+
+
+def _expand_korean_token(token: str) -> Iterable[str]:
+    lowered = token.lower()
+    yield lowered
+
+    if not re.fullmatch(r"[가-힣]+", lowered):
+        return
+
+    seen = {lowered}
+    candidates = [lowered]
+
+    for _ in range(2):
+        next_round = []
+        for candidate in candidates:
+            for suffix in _KOREAN_PARTICLE_SUFFIXES:
+                if not candidate.endswith(suffix):
+                    continue
+                stem = candidate[:-len(suffix)]
+                if len(stem) < 2 or stem in seen:
+                    continue
+                seen.add(stem)
+                next_round.append(stem)
+                yield stem
+        if not next_round:
+            break
+        candidates = next_round
 
 
 def tokenize_text(text: str) -> List[str]:
     """Tokenize Korean/English technical text while preserving codes like E-401."""
-    return [token.lower() for token in _TOKEN_RE.findall(text or "")]
+    tokens: List[str] = []
+    for raw_token in _TOKEN_RE.findall(text or ""):
+        tokens.extend(_expand_korean_token(raw_token))
+    return tokens
 
 
 class InMemoryBM25Index:
