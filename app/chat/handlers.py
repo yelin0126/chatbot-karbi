@@ -182,6 +182,145 @@ def _normalize_for_match(text: str) -> str:
     return text
 
 
+_HANGUL_RE = re.compile(r"[가-힣]")
+_CJK_PUNCT_RE = re.compile(r"[，。！？：；「」『』（）［］【】、]")
+
+
+def _contains_any(text: str, keywords: List[str]) -> bool:
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _might_need_web_search(text: str) -> bool:
+    """Light heuristic: does this query likely need current or real-time info?"""
+    indicators = [
+        "오늘", "현재", "최신", "최근", "실시간", "지금", "방금",
+        "날씨", "뉴스", "주가", "환율", "점수", "스코어", "시세",
+        "today", "current", "latest", "recent", "now", "weather",
+        "news", "stock", "price", "score", "exchange rate", "live",
+        "search", "look up", "find out",
+    ]
+    return _contains_any(text, indicators)
+
+
+def _needs_full_document_context(text: str) -> bool:
+    """Detect requests that need the whole uploaded document, not just top-k chunks."""
+    indicators = [
+        "요약", "정리", "전체", "전반", "구조", "목차", "분석", "핵심",
+        "주요 내용", "전체 내용", "섹션",
+        "section", "structure", "outline", "overview", "summarize", "summary",
+        "analyze", "analysis", "key points", "main points", "extract key",
+        "extract data", "important information", "important info",
+    ]
+    return _contains_any(text, indicators)
+
+
+def _is_smalltalk_query(text: str) -> bool:
+    """Detect greetings/acknowledgements that should bypass document scoping."""
+    indicators = [
+        "안녕", "고마워", "감사", "됐어", "됐고", "오케이", "확인",
+        "hello", "hi", "thanks", "thank you", "okay", "ok", "got it",
+    ]
+    return _contains_any(text, indicators)
+
+
+def _is_document_intent_query(text: str) -> bool:
+    """Heuristic: whether the user is likely asking about uploaded documents."""
+    lower = (text or "").lower().strip()
+    indicators = [
+        "문서", "파일", "첨부", "업로드", "pdf", "페이지", "쪽", "본문", "원문",
+        "출처", "해당 문서", "이 문서", "이 파일", "그 문서", "그 파일",
+        "document", "file", "attachment", "uploaded", "upload", "page",
+        "section", "paragraph", "table", "figure", "source", "quote",
+    ]
+    followup_hints = [
+        "그 부분", "이 내용", "방금 내용", "그거", "거기", "다시", "이어서", "계속",
+    ]
+
+    if any(keyword in lower for keyword in indicators):
+        return True
+
+    if len(lower) <= 20 and any(hint in lower for hint in followup_hints):
+        return True
+
+    return False
+
+
+def _is_scope_followup_query(text: str) -> bool:
+    """Heuristic: follow-up utterance likely referring to previously scoped document chat."""
+    lower = (text or "").lower().strip()
+    if not lower:
+        return False
+
+    hints = [
+        "그 부분", "그 내용", "이 내용", "방금", "앞에서", "이어서", "계속", "다시",
+        "그거", "거기", "그 다음", "다음 조항", "다음 항목", "해당 내용", "그 문장",
+        "몇 페이지", "어느 페이지",
+    ]
+    if any(hint in lower for hint in hints):
+        return True
+
+    if len(lower) <= 40 and any(token in lower for token in ["다시", "이어서", "계속", "그거", "거기", "해당"]):
+        return True
+
+    return False
+
+
+def _is_scope_reset_query(text: str) -> bool:
+    """Detect explicit intent to stop document-scoped conversation."""
+    indicators = [
+        "문서 말고", "파일 말고", "업로드 말고", "일반 질문", "새 주제", "주제 바꿔",
+        "이제 다른 질문", "그거 말고", "문서와 상관없이",
+    ]
+    return _contains_any(text, indicators)
+
+
+def _document_not_found_answer(
+    user_message: str,
+    active_source: Optional[str],
+    active_doc_id: Optional[str] = None,
+) -> str:
+    """Return a grounded fallback when scoped retrieval confidence is too low."""
+    source_name = active_source or active_doc_id or "the uploaded document"
+    if _HANGUL_RE.search(user_message or ""):
+        return (
+            f"업로드한 문서 '{source_name}'에서 질문과 관련된 정보를 찾지 못했습니다. "
+            "질문을 조금 더 구체적으로 적어 주세요."
+        )
+    return (
+        f"I couldn't find relevant information in the uploaded document '{source_name}'. "
+        "Please try a more specific question."
+    )
+
+
+def _is_direct_extraction_query(text: str) -> bool:
+    """Detect requests that want raw OCR/text output from the uploaded file."""
+    indicators = [
+        "텍스트 추출", "문자 추출", "글자 추출", "읽어줘", "텍스트만", "원문", "ocr",
+        "모든 텍스트", "전체 텍스트", "텍스트 보여", "읽어", "전문",
+        "what does this image say", "what does the image say",
+        "give me the text", "extract the text", "read the text",
+        "read this image", "text in the image", "transcribe",
+    ]
+    return _contains_any(text, indicators)
+
+
+def _normalize_for_match(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^0-9a-z가-힣\\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _direct_extraction_ambiguous_answer(upload_sources: List[str]) -> str:
+    preview = ", ".join(upload_sources[:3])
+    suffix = f" 외 {len(upload_sources) - 3}개" if len(upload_sources) > 3 else ""
+    return (
+        "업로드된 파일이 여러 개라 어느 파일에서 텍스트를 추출해야 할지 모르겠습니다. "
+        f"파일명을 함께 말해 주세요. 예: {preview}{suffix}"
+    )
+
+
 def _list_uploaded_sources(owner_id: Optional[str] = None) -> List[str]:
     """Return unique uploaded source names from lightweight document registry."""
     try:
@@ -310,6 +449,24 @@ def _build_direct_extraction_answer(active_source: Optional[str], docs) -> str:
     return f"Extracted text:\n\n{extracted}"
 
 
+def _build_direct_extraction_answer(active_source: Optional[str], docs) -> str:
+    """Return extracted document text directly for OCR/transcription requests."""
+    extracted = "\n\n".join(
+        _strip_enrichment_header(doc.page_content)
+        for doc in docs
+        if _strip_enrichment_header(doc.page_content)
+    ).strip()
+
+    if not extracted:
+        fallback_source = active_source or (docs[0].metadata.get("source") if docs else None)
+        fallback_doc_id = docs[0].metadata.get("doc_id") if docs else None
+        return _document_not_found_answer("extract text", fallback_source, fallback_doc_id)
+
+    if _HANGUL_RE.search(extracted):
+        return f"추출된 텍스트:\n\n{extracted}"
+    return f"Extracted text:\n\n{extracted}"
+
+
 def _scoped_confidence_threshold(docs) -> float:
     """
     Use a slightly lower threshold for tiny uploaded docs where one chunk is
@@ -371,6 +528,20 @@ CRITICAL RULES:
 8. When citing documents, mention the source naturally (e.g., "문서 3페이지에 따르면..." or "According to page 3...").
 9. If retrieved text includes Chinese characters, translate/paraphrase them into Korean or the user's language instead of copying Chinese characters.
 10. Do NOT use markdown emphasis symbols in the final answer (forbidden: **, __). Output plain text only."""
+
+
+_SYSTEM_PROMPT = """You are Tilon AI, a careful document-based assistant.
+
+CRITICAL RULES:
+1. Respond in the same language as the user. Korean questions should be answered in natural Korean. English questions should be answered in English.
+2. If document context is relevant, answer from the document first and cite the source naturally with document name and page number when available.
+3. If retrieved document context is not relevant, do not force it into the answer.
+4. If the answer is not supported by the document context, say you could not find it in the document instead of guessing.
+5. If web search results are provided, use them only for current or real-time information and distinguish them from document evidence.
+6. Never output Chinese characters unless the user explicitly asked for Chinese. If Chinese appears in retrieved text, paraphrase it into the user's language.
+7. Be concise, direct, and grounded. Answer first, then add short explanation if needed.
+8. Do not use markdown emphasis markers such as ** or __ in the final answer. Output plain text only.
+"""
 
 
 def _build_prompt(
