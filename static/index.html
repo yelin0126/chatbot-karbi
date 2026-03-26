@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>사내 틸론AI</title>
+    <title>삼육재단AI</title>
     <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -18,8 +18,11 @@
 
         #login-screen { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 200; }
         .login-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 48px 40px; width: 400px; box-shadow: 0 8px 40px rgba(0,0,0,.10); }
-        .login-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 32px; }
+        .login-logo { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; }
         .login-logo span { font-size: 20px; font-weight: 700; color: var(--tp); }
+        .brand-mark { display: block; height: auto; flex-shrink: 0; }
+        .brand-mark.login { width: 104px; }
+        .brand-mark.sidebar { width: 88px; margin-right: 8px; }
         .login-card h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
         .login-card p { font-size: 14px; color: var(--ts); margin-bottom: 28px; }
         .fg { margin-bottom: 16px; }
@@ -167,7 +170,7 @@
     <div class="modal">
         <h3>⚙️ 시스템 프롬프트 설정</h3>
         <p>AI의 역할과 응답 방식을 지정하세요.</p>
-        <textarea id="sp-input" placeholder="예: 당신은 사내 법무팀 틸론AI입니다."></textarea>
+        <textarea id="sp-input" placeholder="예: 당신은 사내 법무팀 삼육재단AI입니다."></textarea>
         <div class="modal-btns">
             <button class="mbtn cancel" onclick="closeModal('sp-modal')">취소</button>
             <button class="mbtn save" onclick="savePrompt()">저장</button>
@@ -178,13 +181,8 @@
 <div id="login-screen">
     <div class="login-card">
         <div class="login-logo">
-            <svg width="28" height="28" viewBox="0 0 22 22" fill="none">
-                <circle cx="6" cy="6" r="5" fill="#EF4444"/>
-                <circle cx="16" cy="6" r="5" fill="#FBBF24"/>
-                <circle cx="6" cy="16" r="5" fill="#3B82F6"/>
-                <circle cx="16" cy="16" r="5" fill="#22C55E"/>
-            </svg>
-            <span>틸론 AI</span>
+<img class="brand-mark login" src="/static/swf-logo.svg?v=1" alt="삼육재단AI 로고">
+            <span>삼육재단AI</span>
         </div>
         <h2>로그인</h2>
         <p>직원 계정으로 로그인하세요</p>
@@ -199,13 +197,8 @@
     <div class="sidebar">
         <div class="sb-header">
             <div class="ws-name">
-                <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style="margin-right:6px">
-                    <circle cx="6" cy="6" r="5" fill="#EF4444"/>
-                    <circle cx="16" cy="6" r="5" fill="#FBBF24"/>
-                    <circle cx="6" cy="16" r="5" fill="#3B82F6"/>
-                    <circle cx="16" cy="16" r="5" fill="#22C55E"/>
-                </svg>
-                틸론 AI
+<img class="brand-mark sidebar" src="/static/swf-logo.svg?v=1" alt="삼육재단AI 로고">
+                삼육재단AI
             </div>
             <div class="us-status"><div class="sdot"></div><span id="sb-user">직원</span></div>
         </div>
@@ -290,7 +283,7 @@
     const MAX_SHELF_FILES = 90;
     const HISTORY_MAX_MESSAGES = 12;
 
-    const DEFAULT_SYSTEM_PROMPT = '당신은 사내 틸론AI입니다. 한국어로 친절하고 명확하게 답변하세요. 중국어(한자)는 절대 사용하지 마세요.';
+    const DEFAULT_SYSTEM_PROMPT = '당신은 삼육재단AI입니다. 한국어로 친절하고 명확하게 답변하세요. 중국어(한자)는 절대 사용하지 마세요.';
 
     let currentUser = null;
     let isLoading = false;
@@ -326,7 +319,7 @@
             active_source: chat.active_source || null,
             active_doc_id: chat.active_doc_id || null,
             messages: Array.isArray(chat.messages) ? chat.messages.map(m => ({
-                sender: m.sender || '틸론AI',
+                sender: m.sender || '삼육재단AI',
                 text: m.text || '',
                 isUser: !!m.isUser,
                 hasScope: false
@@ -976,7 +969,7 @@
                     detail = String(errPayload.detail || errPayload.message || '').trim();
                 } catch {}
                 const suffix = detail ? (' | ' + detail) : '';
-                renderMsg('틸론AI', '⚠️ 서버 오류가 발생했습니다.' + suffix, false, false, true);
+                renderMsg('삼육재단AI', '⚠️ 서버 오류가 발생했습니다.' + suffix, false, false, true);
             } else {
                 const d = await res.json();
                 const answer = d.answer || d.reply || '응답이 비어 있습니다.';
@@ -990,7 +983,7 @@
                 }
 
                 const hasScope = !!(chat.active_source || chat.active_doc_id);
-                const aMsg = { sender: '틸론AI', text: answer, isUser: false, hasScope };
+                const aMsg = { sender: '삼육재단AI', text: answer, isUser: false, hasScope };
                 chat.messages.push(aMsg);
                 saveChats();
                 renderMsg(aMsg.sender, aMsg.text, false, hasScope, true);
@@ -998,9 +991,9 @@
         } catch (err) {
             removeTyping(tid);
             if (err.name === 'AbortError') {
-                renderMsg('틸론AI', '⏹ 응답이 중지되었습니다.', false, false, true);
+                renderMsg('삼육재단AI', '⏹ 응답이 중지되었습니다.', false, false, true);
             } else {
-                renderMsg('틸론AI', '⚠️ 서버에 연결할 수 없습니다.\n' + API + ' 확인하세요.', false, false, true);
+                renderMsg('삼육재단AI', '⚠️ 서버에 연결할 수 없습니다.\n' + API + ' 확인하세요.', false, false, true);
             }
         }
 
@@ -1040,7 +1033,7 @@
         const el = document.createElement('div');
         el.id = id;
         el.className = 'typing';
-        el.innerHTML = `<span class="typing-label">틸론AI</span>
+        el.innerHTML = `<span class="typing-label">삼육재단AI</span>
             <div class="dots"><span></span><span></span><span></span></div>`;
         msgs.appendChild(el);
         msgs.scrollTop = msgs.scrollHeight;
