@@ -13,6 +13,8 @@ chroma_db/
 marker_output/
 finetuning/output/
 finetuning/results/
+models/
+ocr-data/
 data/uploads/*
 !data/uploads/.gitkeep
 data/temp/*
@@ -21,6 +23,9 @@ data/document_registry.json
 *.gguf
 *.bin
 *.safetensors
+*.log
+*.out
+*.err
 
 # IDE
 .vscode/

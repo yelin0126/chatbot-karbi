@@ -9,6 +9,7 @@ IMPROVEMENTS over original:
 """
 
 import logging
+import json
 from typing import Dict, Any, Optional
 
 import requests
@@ -25,6 +26,33 @@ from app.config import (
 logger = logging.getLogger("tilon.llm")
 
 MAX_RETRIES = 2
+
+
+def _format_ollama_error(response: requests.Response, model: str) -> str:
+    """Return a user-friendly Ollama error message when possible."""
+    raw_text = (response.text or "").strip()
+    error_text = raw_text
+
+    try:
+        payload = response.json()
+        error_text = str(payload.get("error") or raw_text)
+    except (ValueError, json.JSONDecodeError):
+        pass
+
+    lowered = error_text.lower()
+    if "requires more system memory" in lowered:
+        return (
+            f"Ollama could not load model '{model}' because the machine does not have enough free memory. "
+            "Choose a smaller model in the UI or close other memory-heavy apps, then try again."
+        )
+
+    if "not found" in lowered:
+        return (
+            f"Ollama model '{model}' is not installed. "
+            "Pick an installed model from the selector or run 'ollama pull' for that model."
+        )
+
+    return f"Ollama error: status={response.status_code}, body={error_text[:500]}"
 
 
 def call_ollama(
@@ -65,7 +93,7 @@ def call_ollama(
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Ollama error: status={response.status_code}, body={response.text[:500]}",
+                    detail=_format_ollama_error(response, model),
                 )
 
             data = response.json()

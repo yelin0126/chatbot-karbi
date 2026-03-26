@@ -90,9 +90,29 @@ def health():
 @router.get("/models")
 def list_models():
     """Return available Ollama models for the UI model selector."""
+    available = AVAILABLE_MODELS
+    default_model = OLLAMA_MODEL
+
+    try:
+        ollama_status = check_ollama_health()
+        if ollama_status.get("status") == "connected":
+            raw_models = ollama_status.get("models", {}).get("models", [])
+            installed = [
+                item.get("name")
+                for item in raw_models
+                if isinstance(item, dict) and item.get("name")
+            ]
+            if installed:
+                configured = [model for model in AVAILABLE_MODELS if model in installed]
+                available = configured or installed
+                if default_model not in available:
+                    default_model = available[0]
+    except Exception:
+        logger.debug("Falling back to configured model list", exc_info=True)
+
     return {
-        "default": OLLAMA_MODEL,
-        "available": AVAILABLE_MODELS,
+        "default": default_model,
+        "available": available,
     }
 
 
