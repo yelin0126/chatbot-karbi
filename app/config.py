@@ -33,6 +33,7 @@ MARKER_OUTPUT_DIR = BASE_DIR / "marker_output"
 # ── Ollama / LLM ──────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/api")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen2.5vl:7b")
 AVAILABLE_MODELS = os.getenv(
     "AVAILABLE_MODELS",
     "qwen2.5:7b,llama3.1:latest,llama3.2-vision:11b",
@@ -90,9 +91,13 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 # ── Features ──────────────────────────────────────────────────────────
 ENABLE_OCR = os.getenv("ENABLE_OCR", "true").lower() == "true"
 AUTO_INGEST_ON_STARTUP = os.getenv("AUTO_INGEST_ON_STARTUP", "false").lower() == "true"
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "ko")
 
 # ── Web Search (NEW — original had mode but no actual search) ─────────
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+DUCKDUCKGO_MAX_RESULTS = max(1, int(os.getenv("DUCKDUCKGO_MAX_RESULTS", "5")))
+DUCKDUCKGO_REGION = os.getenv("DUCKDUCKGO_REGION", "kr-kr")
 
 # ── VLM PDF Extraction (NEW) ─────────────────────────────────────────
 VLM_EXTRACTION_ENABLED = os.getenv("VLM_EXTRACTION_ENABLED", "true").lower() == "true"

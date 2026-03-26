@@ -75,6 +75,12 @@ class CountKeywordRequest(BaseModel):
     keyword: str
 
 
+class WebSearchRequest(BaseModel):
+    query: str
+    max_results: int = Field(default=5, ge=1, le=10)
+    region: str = "kr-kr"
+
+
 # ── OpenAI-Compatible ──────────────────────────────────────────────────
 
 class OpenAIMessage(BaseModel):

@@ -25,15 +25,22 @@ from app.config import (
     UPLOADS_DIR,
     CHROMA_DIR,
     ENABLE_OCR,
+    VISION_MODEL,
+    WHISPER_MODEL,
+    DUCKDUCKGO_REGION,
 )
 from app.models.schemas import (
     ChatRequest,
     ChatResponse,
     IngestRequest,
     CountKeywordRequest,
+    WebSearchRequest,
     SourceInfo,
 )
 from app.core.llm import check_ollama_health
+from app.core.stt import transcribe_audio_bytes
+from app.core.vision import analyze_image_bytes
+from app.core.web_search import search_web
 from app.core.document_registry import clear_document_registry, remove_documents
 from app.core.watcher import suppress_watcher_for
 from app.core.vectorstore import (
@@ -117,6 +124,9 @@ def health():
             "available_models": AVAILABLE_MODELS,
             "documents_in_vectorstore": stats["total_chunks"],
             "ocr_enabled": ENABLE_OCR,
+            "vision_model": VISION_MODEL,
+            "stt_model": WHISPER_MODEL,
+            "web_search_provider": "tavily_or_duckduckgo",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Health check failed: {e}")
@@ -601,3 +611,101 @@ def count_keyword(req: CountKeywordRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"count-keyword failed: {e}")
+
+
+@router.post("/upload-image")
+async def upload_image(
+    file: UploadFile = File(...),
+    prompt: str = Form(default="이 이미지를 한국어로 자세히 설명해주세요."),
+    model: Optional[str] = Form(default=None),
+):
+    """Analyze a single image directly with the vision model."""
+    try:
+        content = await file.read()
+        reply = analyze_image_bytes(content, file.filename or "", prompt=prompt, model=model)
+        return {
+            "file": file.filename,
+            "reply": reply,
+            "model": model or VISION_MODEL,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"upload-image failed: {e}")
+
+
+@router.post("/stt")
+async def speech_to_text(file: UploadFile = File(...)):
+    """Transcribe one uploaded audio file with Whisper."""
+    try:
+        content = await file.read()
+        text = transcribe_audio_bytes(content, file.filename or "")
+        return {
+            "file": file.filename,
+            "text": text,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"stt failed: {e}")
+
+
+@router.post("/chat-audio")
+async def chat_audio(
+    file: UploadFile = File(...),
+    model: Optional[str] = Form(default=None),
+    active_source: Optional[str] = Form(default=None),
+    active_doc_id: Optional[str] = Form(default=None),
+    active_source_type: Optional[str] = Form(default=None),
+    system_prompt: Optional[str] = Form(default=None),
+    web_search_enabled: bool = Form(default=True),
+):
+    """Transcribe audio and pass the recognized text through the normal chat flow."""
+    try:
+        content = await file.read()
+        recognized_text = transcribe_audio_bytes(content, file.filename or "")
+        result = handle_chat(
+            user_message=recognized_text,
+            model=model or OLLAMA_MODEL,
+            active_source=active_source,
+            active_doc_id=active_doc_id,
+            active_source_type=active_source_type,
+            system_prompt=system_prompt,
+            web_search_enabled=web_search_enabled,
+        )
+        return {
+            "recognized_text": recognized_text,
+            "answer": result["answer"],
+            "sources": result.get("sources", []),
+            "mode": result.get("mode", "general"),
+            "active_source": result.get("active_source", active_source),
+            "active_doc_id": result.get("active_doc_id", active_doc_id),
+            "model": model or OLLAMA_MODEL,
+            "done": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"chat-audio failed: {e}")
+
+
+@router.post("/web-search")
+def web_search(req: WebSearchRequest):
+    """Structured web search endpoint with Tavily or DuckDuckGo fallback."""
+    try:
+        results = search_web(
+            req.query,
+            max_results=req.max_results,
+            region=req.region or DUCKDUCKGO_REGION,
+        )
+        return {
+            "query": req.query,
+            "count": len(results),
+            "options": {
+                "region": req.region,
+                "max_results": req.max_results,
+            },
+            "results": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"web-search failed: {e}")

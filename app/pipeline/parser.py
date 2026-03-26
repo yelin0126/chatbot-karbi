@@ -944,6 +944,79 @@ def _select_best_page_candidate(
     return best_doc
 
 
+def _extract_with_pdfplumber(pdf_path: str, artifact_meta: Dict[str, Any]) -> List[Document]:
+    """
+    Conservative fallback for text/table-heavy PDFs when the routed parser result is sparse.
+
+    This stays page-based so it fits the current ingestion/chunking pipeline.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        logger.debug("pdfplumber not installed; skipping pdfplumber fallback")
+        return []
+
+    docs: List[Document] = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                parts: List[str] = []
+
+                tables = page.extract_tables() or []
+                for table in tables:
+                    rows = [
+                        "\t".join((cell or "").strip() for cell in row)
+                        for row in table
+                        if row
+                    ]
+                    table_text = "\n".join(row for row in rows if row.strip()).strip()
+                    if table_text:
+                        parts.append(f"[표]\n{table_text}")
+
+                text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
+                normalized = _normalize_extracted_text(text)
+                if normalized:
+                    parts.append(normalized)
+
+                combined = "\n\n".join(part for part in parts if part).strip()
+                if not combined:
+                    continue
+
+                docs.append(
+                    _make_page_document(
+                        text=combined,
+                        base_meta=artifact_meta,
+                        page=page_num,
+                        extraction_method="pdfplumber",
+                        page_kind="digital",
+                        chunk_type="page",
+                        section_title="",
+                        extractors_used="pdfplumber",
+                        routing_reason="pdfplumber_fallback",
+                        fallback_chain="pdfplumber",
+                        reading_order_mode="pdfplumber",
+                        layout_block_count=1,
+                        layout_text_block_count=1,
+                        layout_image_block_count=0,
+                        layout_heading_count=0,
+                        layout_table_like_count=len(tables),
+                        layout_block_types="table,paragraph" if tables else "paragraph",
+                        primary_heading="",
+                        heading_candidates="",
+                        primary_heading_bbox="",
+                        page_bbox="",
+                        has_text_layer=True,
+                        page_font_avg=0.0,
+                        page_font_max=0.0,
+                    )
+                )
+    except Exception as e:
+        logger.debug("pdfplumber fallback failed for %s: %s", pdf_path, e)
+        return []
+
+    return docs
+
+
 def _parse_pdf_page(
     page: fitz.Page,
     pdf_path: str,
@@ -1160,6 +1233,18 @@ def parse_pdf(pdf_path: str) -> List[Document]:
             "  → Using routed per-page extraction (avg %.0f chars/page)",
             avg_chars_per_page,
         )
+        if avg_chars_per_page < 90 or len(page_docs) < max(1, total_pages // 2):
+            plumber_docs = _extract_with_pdfplumber(pdf_path, artifact_meta)
+            plumber_chars = sum(len(doc.page_content) for doc in plumber_docs)
+            if plumber_docs and plumber_chars > max(page_chars * 1.2, page_chars + 500):
+                logger.info(
+                    "  ??Using pdfplumber fallback (%d chars across %d pages vs routed %d chars)",
+                    plumber_chars,
+                    len(plumber_docs),
+                    page_chars,
+                )
+                return plumber_docs
+
         return page_docs
 
     if marker_text:
@@ -1193,6 +1278,11 @@ def parse_pdf(pdf_path: str) -> List[Document]:
         return [marker_doc]
 
     logger.warning("  → No text extracted from %s", pdf_file.name)
+    plumber_docs = _extract_with_pdfplumber(pdf_path, artifact_meta)
+    if plumber_docs:
+        logger.info("  ??Using pdfplumber-only fallback (%d pages extracted)", len(plumber_docs))
+        return plumber_docs
+
     return []
 
 

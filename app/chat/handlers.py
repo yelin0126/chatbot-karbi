@@ -18,13 +18,13 @@ from typing import List, Dict, Any, Optional
 
 from app.models.schemas import Message
 from app.core.llm import call_ollama, get_response_text
+from app.core.web_search import format_search_results, search_web
 from app.retrieval.retriever import retrieve, format_context, extract_sources
 from app.core.vectorstore import get_documents_by_source, get_document_chunk_count
 from app.core.document_registry import list_documents
 from app.pipeline.parser import extract_full_text
 from app.config import (
     OLLAMA_MODEL,
-    TAVILY_API_KEY,
     DOCUMENT_CONFIDENCE_THRESHOLD,
     SCOPED_SINGLE_CHUNK_CONFIDENCE_THRESHOLD,
     SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS,
@@ -42,27 +42,9 @@ _CJK_PUNCT_RE = re.compile(r"[，。！？；：、﹐﹒﹔﹕「」『』【�
 # ═══════════════════════════════════════════════════════════════════════
 
 def _search_web(query: str) -> str:
-    """Search Tavily for current/real-time information. Returns formatted results."""
-    if not TAVILY_API_KEY:
-        return ""
-
+    """Search current information using the shared search helper."""
     try:
-        from tavily import TavilyClient
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.search(query, max_results=3)
-
-        results = []
-        for r in response.get("results", []):
-            title = r.get("title", "")
-            content = r.get("content", "")
-            url = r.get("url", "")
-            results.append(f"- {title}: {content} ({url})")
-
-        return "\n".join(results) if results else ""
-
-    except ImportError:
-        logger.debug("tavily-python not installed")
-        return ""
+        return format_search_results(search_web(query, max_results=3))
     except Exception as e:
         logger.debug("Web search failed: %s", e)
         return ""
