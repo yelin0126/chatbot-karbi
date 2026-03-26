@@ -8,11 +8,13 @@ IMPROVEMENTS over original:
 - Health check includes more diagnostics
 """
 
+import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from threading import Lock
+from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Body
 from starlette.concurrency import run_in_threadpool
 
 from app.config import (
@@ -48,6 +50,40 @@ from app.pipeline.parser import extract_full_text
 logger = logging.getLogger("tilon.api")
 
 router = APIRouter()
+_ui_state_lock = Lock()
+
+
+def _normalize_user_id(user_id: Optional[str]) -> Optional[str]:
+    if user_id is None:
+        return None
+    raw = str(user_id).strip()
+    if not raw:
+        return None
+
+    safe = Path(raw).name.strip()
+    if not safe or safe in {".", ".."}:
+        return None
+    return safe
+
+
+def _ui_chats_state_path(user_id: Optional[str]) -> Path:
+    normalized_user_id = _normalize_user_id(user_id)
+    state_dir = DATA_DIR / "ui_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"chats_{normalized_user_id}.json" if normalized_user_id else "chats_default.json"
+    return state_dir / filename
+
+
+def _resolve_upload_target(filename: str, user_id: Optional[str]) -> Tuple[Path, Optional[str], str]:
+    safe_filename = Path(filename or "").name
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="유효한 파일명이 필요합니다.")
+
+    normalized_user_id = _normalize_user_id(user_id)
+    target_dir = UPLOADS_DIR / normalized_user_id if normalized_user_id else UPLOADS_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    return target_dir / safe_filename, normalized_user_id, safe_filename
 
 
 # ── Root ───────────────────────────────────────────────────────────────
@@ -97,6 +133,62 @@ def list_models():
     }
 
 
+# ── UI State (Chat History Persistence) ───────────────────────────────
+
+@router.get("/ui-state/chats")
+def get_ui_state_chats(user_id: Optional[str] = None):
+    state_path = _ui_chats_state_path(user_id)
+
+    if not state_path.exists():
+        return {"chats": {}}
+
+    with _ui_state_lock:
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("Failed to read UI chat state (%s): %s", state_path, e)
+            return {"chats": {}}
+
+    chats = payload.get("chats") if isinstance(payload, dict) else {}
+    if not isinstance(chats, dict):
+        chats = {}
+
+    return {"chats": chats}
+
+
+@router.put("/ui-state/chats")
+def put_ui_state_chats(
+    payload: dict = Body(...),
+    user_id: Optional[str] = None,
+):
+    chats = payload.get("chats") if isinstance(payload, dict) else None
+    if not isinstance(chats, dict):
+        raise HTTPException(status_code=400, detail="'chats' must be an object.")
+
+    state_path = _ui_chats_state_path(user_id)
+    doc = {"chats": chats}
+
+    try:
+        encoded = json.dumps(doc, ensure_ascii=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid chats payload: {e}")
+
+    if len(encoded.encode("utf-8")) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Chat state payload too large.")
+
+    with _ui_state_lock:
+        try:
+            state_path.write_text(
+                json.dumps(doc, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.exception("Failed to write UI chat state (%s)", state_path)
+            raise HTTPException(status_code=500, detail=f"Failed to save UI chat state: {e}")
+
+    return {"saved": True, "count": len(chats)}
+
+
 # ── Chat ───────────────────────────────────────────────────────────────
 
 @router.post("/chat", response_model=ChatResponse)
@@ -115,6 +207,7 @@ def chat(req: ChatRequest):
             active_source_type=req.active_source_type,
             system_prompt=req.system_prompt,
             web_search_enabled=req.web_search_enabled,
+            user_id=req.user_id,
         )
 
         return ChatResponse(
@@ -142,6 +235,7 @@ async def chat_with_file(
     message: str = Form(default="이 문서의 내용을 요약해줘"),
     model: str = Form(default=None),
     web_search_enabled: bool = Form(default=True),
+    user_id: Optional[str] = Form(default=None),
 ):
     """
     Upload a file AND ask a question about it in one request.
@@ -153,7 +247,8 @@ async def chat_with_file(
         -F "message=이 문서의 주요 내용은?"
     """
     allowed_extensions = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
-    ext = Path(file.filename).suffix.lower()
+    save_path, normalized_user_id, safe_filename = _resolve_upload_target(file.filename, user_id)
+    ext = Path(safe_filename).suffix.lower()
 
     if ext not in allowed_extensions:
         raise HTTPException(
@@ -161,22 +256,20 @@ async def chat_with_file(
             detail=f"Unsupported file type: {ext}",
         )
 
-    # Step 1: Save the file to chat uploads
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    save_path = UPLOADS_DIR / file.filename
+    # Step 1: Save the file to user-scoped uploads
 
     try:
         with open(save_path, "wb") as f:
             content = await file.read()
             f.write(content)
         suppress_watcher_for(save_path)
-        logger.info("Saved uploaded file: %s (%d bytes)", file.filename, len(content))
+        logger.info("Saved uploaded file: %s (%d bytes, user=%s)", safe_filename, len(content), normalized_user_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
     # Step 2: Ingest into ChromaDB
     try:
-        ingest_result = await run_in_threadpool(ingest_single_file, save_path)
+        ingest_result = await run_in_threadpool(ingest_single_file, save_path, normalized_user_id)
     except Exception as e:
         logger.exception("chat-with-file ingest failed")
         raise HTTPException(status_code=500, detail=f"File ingest failed: {e}")
@@ -199,9 +292,10 @@ async def chat_with_file(
         result = handle_chat(
             user_message=message,
             model=selected_model,
-            active_source=file.filename,
+            active_source=safe_filename,
             active_doc_id=ingest_result.get("doc_id"),
             web_search_enabled=web_search_enabled,
+            user_id=normalized_user_id,
         )
     except HTTPException:
         raise
@@ -214,7 +308,7 @@ async def chat_with_file(
         "answer": result["answer"],
         "sources": result.get("sources", []),
         "mode": result.get("mode", "document_qa"),
-        "active_source": file.filename,
+        "active_source": safe_filename,
         "active_doc_id": ingest_result.get("doc_id"),
         "ingest": ingest_result,
         "done": True,
@@ -240,7 +334,7 @@ ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 MAX_MULTI_UPLOAD_FILES = 90
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), user_id: Optional[str] = Form(default=None)):
     """
     Upload a file, parse it, chunk it, and store it in the vectorstore.
 
@@ -252,29 +346,28 @@ async def upload_file(file: UploadFile = File(...)):
         curl -X POST http://localhost:8000/upload -F "file=@document.pdf"
     """
     # Validate file type
-    ext = Path(file.filename).suffix.lower()
+    save_path, normalized_user_id, safe_filename = _resolve_upload_target(file.filename, user_id)
+    ext = Path(safe_filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: {ext}. Allowed: {ALLOWED_EXTENSIONS}",
         )
 
-    # Save to chat uploads directory
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    save_path = UPLOADS_DIR / file.filename
+    # Save to user-scoped uploads directory
 
     try:
         with open(save_path, "wb") as f:
             content = await file.read()
             f.write(content)
         suppress_watcher_for(save_path)
-        logger.info("Saved uploaded file: %s (%d bytes)", file.filename, len(content))
+        logger.info("Saved uploaded file: %s (%d bytes, user=%s)", safe_filename, len(content), normalized_user_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
     # Parse, chunk, and store
     try:
-        result = await run_in_threadpool(ingest_single_file, save_path)
+        result = await run_in_threadpool(ingest_single_file, save_path, normalized_user_id)
 
         if result["count"] == 0:
             raise HTTPException(
@@ -284,7 +377,7 @@ async def upload_file(file: UploadFile = File(...)):
 
         return {
             "message": result["message"],
-            "filename": file.filename,
+            "filename": safe_filename,
             "chunks_stored": result["count"],
             "doc_id": result.get("doc_id"),
             "source_type": result.get("source_type"),
@@ -297,7 +390,7 @@ async def upload_file(file: UploadFile = File(...)):
 
 
 @router.post("/upload-multiple")
-async def upload_multiple_files(files: List[UploadFile] = File(...)):
+async def upload_multiple_files(files: List[UploadFile] = File(...), user_id: Optional[str] = Form(default=None)):
     """Upload and ingest multiple files at once."""
     if len(files) > MAX_MULTI_UPLOAD_FILES:
         raise HTTPException(
@@ -313,18 +406,16 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
             results.append({"file": file.filename, "status": "skipped", "reason": f"Unsupported: {ext}"})
             continue
 
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        save_path = UPLOADS_DIR / file.filename
-
         try:
+            save_path, normalized_user_id, safe_filename = _resolve_upload_target(file.filename, user_id)
             with open(save_path, "wb") as f:
                 content = await file.read()
                 f.write(content)
             suppress_watcher_for(save_path)
 
-            result = await run_in_threadpool(ingest_single_file, save_path)
+            result = await run_in_threadpool(ingest_single_file, save_path, normalized_user_id)
             results.append({
-                "file": file.filename,
+                "file": safe_filename,
                 "status": "success" if result["count"] > 0 else "failed",
                 "chunks": result["count"],
                 "message": result["message"],
@@ -356,9 +447,10 @@ def reset_db():
 # ── Document List ──────────────────────────────────────────────────────
 
 @router.get("/docs-list")
-def docs_list():
+def docs_list(user_id: Optional[str] = None):
     try:
-        metadata_list = get_all_metadata()
+        normalized_user_id = _normalize_user_id(user_id)
+        metadata_list = get_all_metadata(owner_id=normalized_user_id)
 
         unique_docs = {}
         for meta in metadata_list:
@@ -393,30 +485,67 @@ def docs_list():
 def delete_upload_document(
     source: Optional[str] = None,
     doc_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
     """Delete one uploaded document from vectorstore/registry and remove local upload file."""
     if not source and not doc_id:
         raise HTTPException(status_code=400, detail="source 또는 doc_id 중 하나는 필요합니다.")
 
     try:
-        deleted_chunks = delete_documents(
-            source=source,
-            doc_id=doc_id,
-            source_type="upload",
-        )
-        removed_registry = remove_documents(
-            source=source,
-            doc_id=doc_id,
-            source_type="upload",
-        )
+        normalized_user_id = _normalize_user_id(user_id)
+        source_candidates: List[Optional[str]] = []
+        if source:
+            source_candidates.append(source)
+            safe_source = Path(source).name
+            if safe_source and safe_source != source:
+                source_candidates.append(safe_source)
+
+        attempts: List[tuple[Optional[str], Optional[str], Optional[str]]] = []
+        seen = set()
+
+        def add_attempt(s: Optional[str], d: Optional[str], st: Optional[str]):
+            if not s and not d and not st:
+                return
+            key = (s or "", d or "", st or "")
+            if key in seen:
+                return
+            seen.add(key)
+            attempts.append((s, d, st))
+
+        for s in source_candidates:
+            add_attempt(s, doc_id, "upload")
+        for s in source_candidates:
+            add_attempt(s, doc_id, None)
+
+        if doc_id:
+            add_attempt(None, doc_id, "upload")
+            add_attempt(None, doc_id, None)
+
+        for s in source_candidates:
+            add_attempt(s, None, "upload")
+            add_attempt(s, None, None)
+
+        deleted_chunks = 0
+        removed_registry = 0
+        for s, d, st in attempts:
+            deleted_chunks += delete_documents(source=s, doc_id=d, source_type=st, owner_id=normalized_user_id)
+            removed_registry += remove_documents(source=s, doc_id=d, source_type=st, owner_id=normalized_user_id)
 
         file_deleted = False
-        if source:
-            safe_source = Path(source).name
-            upload_path = UPLOADS_DIR / safe_source
-            if upload_path.exists() and upload_path.is_file():
-                upload_path.unlink()
-                file_deleted = True
+        candidate_dirs: List[Path] = []
+        if normalized_user_id:
+            candidate_dirs.append(UPLOADS_DIR / normalized_user_id)
+        candidate_dirs.append(UPLOADS_DIR)
+
+        for s in source_candidates:
+            if not s:
+                continue
+            safe_name = Path(s).name
+            for base_dir in candidate_dirs:
+                upload_path = base_dir / safe_name
+                if upload_path.exists() and upload_path.is_file():
+                    upload_path.unlink()
+                    file_deleted = True
 
         if deleted_chunks == 0 and removed_registry == 0 and not file_deleted:
             raise HTTPException(status_code=404, detail="삭제할 업로드 문서를 찾지 못했습니다.")
@@ -428,6 +557,8 @@ def delete_upload_document(
             "file_deleted": file_deleted,
             "source": source,
             "doc_id": doc_id,
+            "attempts": len(attempts),
+            "user_id": normalized_user_id,
         }
     except HTTPException:
         raise

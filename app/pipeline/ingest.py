@@ -25,7 +25,7 @@ from app.core.vectorstore import add_documents, get_ingested_sources
 logger = logging.getLogger("tilon.ingest")
 
 
-def _annotate_source_identity(docs: List[Document], file_path: Path) -> List[Document]:
+def _annotate_source_identity(docs: List[Document], file_path: Path, owner_id: str = None) -> List[Document]:
     """Add source-type metadata before chunking so identity survives downstream."""
     source_type = infer_source_type(file_path)
     doc_scope = "persistent" if source_type == "library" else "chat_upload"
@@ -38,6 +38,7 @@ def _annotate_source_identity(docs: List[Document], file_path: Path) -> List[Doc
                     **doc.metadata,
                     "source_type": source_type,
                     "doc_scope": doc_scope,
+                    "owner_id": owner_id if source_type == "upload" else None,
                 },
             )
         )
@@ -48,7 +49,7 @@ def _annotate_source_identity(docs: List[Document], file_path: Path) -> List[Doc
 # Single File Ingestion (NEW — for /upload endpoint)
 # ═══════════════════════════════════════════════════════════════════════
 
-def ingest_single_file(file_path: Path) -> Dict[str, Any]:
+def ingest_single_file(file_path: Path, owner_id: str = None) -> Dict[str, Any]:
     """
     Parse, chunk, and store a single file into the vectorstore.
     Used by the /upload endpoint when users attach files in chat.
@@ -73,7 +74,7 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
             "file": name,
         }
 
-    docs = _annotate_source_identity(docs, file_path)
+    docs = _annotate_source_identity(docs, file_path, owner_id=owner_id)
 
     if not docs:
         return {
@@ -87,7 +88,7 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
     chunks = chunk_documents(docs)
     chunks = enrich_chunks(chunks)
     add_documents(chunks)
-    registry_entry = upsert_document(file_path, docs, len(chunks))
+    registry_entry = upsert_document(file_path, docs, len(chunks), owner_id=owner_id)
 
     logger.info("Ingested %s → %d chunks", name, len(chunks))
 

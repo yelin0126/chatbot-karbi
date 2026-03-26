@@ -42,6 +42,8 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))
 LLM_REPEAT_PENALTY = float(os.getenv("LLM_REPEAT_PENALTY", "1.15"))
 LLM_REPEAT_LAST_N = int(os.getenv("LLM_REPEAT_LAST_N", "128"))
+LLM_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("LLM_MAX_CONCURRENT_REQUESTS", "1")))
+LLM_QUEUE_TIMEOUT = int(os.getenv("LLM_QUEUE_TIMEOUT", "240"))
 
 # ── Embedding ─────────────────────────────────────────────────────────
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -95,6 +97,11 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 # ── VLM PDF Extraction (NEW) ─────────────────────────────────────────
 VLM_EXTRACTION_ENABLED = os.getenv("VLM_EXTRACTION_ENABLED", "true").lower() == "true"
 VLM_EXTRACTION_MODEL = os.getenv("VLM_EXTRACTION_MODEL", "qwen2.5vl:7b")
+LARGE_FILE_FAST_MODE = os.getenv("LARGE_FILE_FAST_MODE", "true").lower() == "true"
+LARGE_FILE_PAGE_THRESHOLD = max(1, int(os.getenv("LARGE_FILE_PAGE_THRESHOLD", "80")))
+LARGE_FILE_MAX_FALLBACK_PAGES = max(0, int(os.getenv("LARGE_FILE_MAX_FALLBACK_PAGES", "12")))
+LARGE_FILE_CHUNK_SIZE = max(256, int(os.getenv("LARGE_FILE_CHUNK_SIZE", "2200")))
+LARGE_FILE_CHUNK_OVERLAP = max(0, int(os.getenv("LARGE_FILE_CHUNK_OVERLAP", "100")))
 
 # ── Logging ───────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

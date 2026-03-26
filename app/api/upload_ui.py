@@ -407,21 +407,78 @@ const shelfFileInput=document.getElementById('shelfFileInput');
 let pendingFiles=[];
 let currentChatId=null;
 let chats={};  // {id: {title, messages: [{role,content,sources,mode,fileName}]}}
+let chatsSyncTimer=null;
+let applyingServerChats=false;
+
+const CHAT_STORAGE_KEY='tilon_chats';
+const CHAT_SYNC_DELAY_MS=350;
 
 // ═══════════════════════════════════════════════════════════
-// Chat History (localStorage)
+// Chat History (local + server sync)
 // ═══════════════════════════════════════════════════════════
 
-function loadChats(){
-    try{chats=JSON.parse(localStorage.getItem('tilon_chats')||'{}');}catch{chats={};}
+function normalizeChatsShape(){
+    if(!chats||typeof chats!=='object'||Array.isArray(chats)){
+        chats={};
+        return;
+    }
     for(const id of Object.keys(chats)){
         if(!Array.isArray(chats[id].messages))chats[id].messages=[];
         if(typeof chats[id].activeSource!=='string')chats[id].activeSource='';
         if(typeof chats[id].activeDocId!=='string')chats[id].activeDocId='';
+        if(typeof chats[id].title!=='string')chats[id].title='New Chat';
     }
 }
+
+function loadChats(){
+    try{chats=JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY)||'{}');}catch{chats={};}
+    normalizeChatsShape();
+}
+
+function persistChatsLocalOnly(){
+    try{localStorage.setItem(CHAT_STORAGE_KEY,JSON.stringify(chats));}catch{}
+}
+
+function queueChatsSync(){
+    if(applyingServerChats)return;
+    if(chatsSyncTimer)clearTimeout(chatsSyncTimer);
+    chatsSyncTimer=setTimeout(async()=>{
+        try{
+            await fetch('/ui-state/chats',{
+                method:'PUT',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({chats}),
+            });
+        }catch{}
+    },CHAT_SYNC_DELAY_MS);
+}
+
 function saveChats(){
-    try{localStorage.setItem('tilon_chats',JSON.stringify(chats));}catch{}
+    persistChatsLocalOnly();
+    queueChatsSync();
+}
+
+async function loadChatsFromServer(){
+    try{
+        const resp=await fetch('/ui-state/chats');
+        const data=await readApiJson(resp);
+        if(!resp.ok)return;
+
+        const serverChats=(data&&typeof data==='object'&&!Array.isArray(data)&&typeof data.chats==='object'&&!Array.isArray(data.chats))
+            ? data.chats
+            : {};
+
+        if(!Object.keys(serverChats).length)return;
+
+        applyingServerChats=true;
+        chats=serverChats;
+        normalizeChatsShape();
+        persistChatsLocalOnly();
+
+        const ids=Object.keys(chats).sort((a,b)=>parseInt(b.split('_')[1])-parseInt(a.split('_')[1]));
+        if(ids.length>0)loadChat(ids[0]);
+    }catch{}
+    finally{applyingServerChats=false;}
 }
 
 function newChat(){
@@ -1075,6 +1132,7 @@ setInterval(loadHealth,30000);
 const chatIds=Object.keys(chats).sort((a,b)=>parseInt(b.split('_')[1])-parseInt(a.split('_')[1]));
 if(chatIds.length>0){loadChat(chatIds[0]);}else{newChat();}
 
+loadChatsFromServer();
 chatInput.focus();
 </script>
 </body>

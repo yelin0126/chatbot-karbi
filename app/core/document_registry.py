@@ -89,6 +89,7 @@ def upsert_document(
     file_path: Path,
     page_docs: List[Document],
     chunk_count: int,
+    owner_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create or update a document registry entry from parsed page docs."""
     if not page_docs:
@@ -121,6 +122,7 @@ def upsert_document(
             "languages": _summarize_languages(page_docs),
             "page_kind_counts": _page_kind_counts(page_docs),
             "status": "ingested",
+            "owner_id": owner_id if source_type == "upload" else None,
             "updated_at": now,
         }
 
@@ -153,19 +155,32 @@ def get_document(doc_id: str) -> Optional[Dict[str, Any]]:
     return next((doc for doc in registry.get("documents", []) if doc.get("doc_id") == doc_id), None)
 
 
-def list_documents() -> List[Dict[str, Any]]:
+def list_documents(owner_id: Optional[str] = None, source_type: Optional[str] = None) -> List[Dict[str, Any]]:
     with _registry_lock:
         registry = _load_registry()
-    return list(registry.get("documents", []))
+
+    docs = list(registry.get("documents", []))
+    if source_type:
+        docs = [doc for doc in docs if doc.get("source_type") == source_type]
+
+    if owner_id:
+        docs = [
+            doc
+            for doc in docs
+            if (doc.get("source_type") != "upload") or (doc.get("owner_id") == owner_id)
+        ]
+
+    return docs
 
 
 def remove_documents(
     doc_id: Optional[str] = None,
     source: Optional[str] = None,
     source_type: Optional[str] = None,
+    owner_id: Optional[str] = None,
 ) -> int:
     """Remove registry entries matching all provided filters."""
-    if not any([doc_id, source, source_type]):
+    if not any([doc_id, source, source_type, owner_id]):
         return 0
 
     with _registry_lock:
@@ -182,6 +197,11 @@ def remove_documents(
                 matches = False
             if source_type and doc.get("source_type") != source_type:
                 matches = False
+            if owner_id:
+                if doc.get("source_type") != "upload":
+                    matches = False
+                elif doc.get("owner_id") != owner_id:
+                    matches = False
 
             if matches:
                 removed += 1
@@ -194,11 +214,12 @@ def remove_documents(
 
     if removed:
         logger.info(
-            "Removed %d documents from registry (source=%s, doc_id=%s, source_type=%s)",
+            "Removed %d documents from registry (source=%s, doc_id=%s, source_type=%s, owner_id=%s)",
             removed,
             source,
             doc_id,
             source_type,
+            owner_id,
         )
     return removed
 

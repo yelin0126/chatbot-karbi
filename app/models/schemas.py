@@ -31,6 +31,7 @@ class ChatRequest(BaseModel):
     active_doc_id: Optional[str] = None
     active_source_type: Optional[str] = None
     web_search_enabled: bool = True
+    user_id: Optional[str] = None
 
 
 class SourceInfo(BaseModel):

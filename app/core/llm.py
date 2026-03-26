@@ -9,6 +9,8 @@ IMPROVEMENTS over original:
 """
 
 import logging
+import time
+from threading import BoundedSemaphore
 from typing import Dict, Any, Optional
 
 import requests
@@ -22,11 +24,32 @@ from app.config import (
     LLM_TIMEOUT,
     LLM_REPEAT_PENALTY,
     LLM_REPEAT_LAST_N,
+    LLM_MAX_CONCURRENT_REQUESTS,
+    LLM_QUEUE_TIMEOUT,
 )
 
 logger = logging.getLogger("tilon.llm")
 
 MAX_RETRIES = 2
+_OLLAMA_GATE = BoundedSemaphore(value=LLM_MAX_CONCURRENT_REQUESTS)
+
+
+def _acquire_ollama_slot(model: str) -> None:
+    started = time.monotonic()
+    acquired = _OLLAMA_GATE.acquire(timeout=LLM_QUEUE_TIMEOUT)
+    waited = time.monotonic() - started
+
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Ollama is busy (queue timeout after {LLM_QUEUE_TIMEOUT}s). "
+                "Please retry shortly."
+            ),
+        )
+
+    if waited >= 0.25:
+        logger.info("Ollama queue wait %.2fs (model=%s)", waited, model)
 
 
 def call_ollama(
@@ -59,18 +82,26 @@ def call_ollama(
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.debug("Ollama request (attempt %d) → model=%s", attempt, model)
-            response = requests.post(
-                f"{OLLAMA_BASE_URL}/generate",
-                json=payload,
-                timeout=LLM_TIMEOUT,
-            )
+            _acquire_ollama_slot(model)
+            try:
+                logger.debug("Ollama request (attempt %d) -> model=%s", attempt, model)
+                response = requests.post(
+                    f"{OLLAMA_BASE_URL}/generate",
+                    json=payload,
+                    timeout=LLM_TIMEOUT,
+                )
+            finally:
+                _OLLAMA_GATE.release()
 
             if response.status_code != 200:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Ollama error: status={response.status_code}, body={response.text[:500]}",
-                )
+                detail = f"Ollama error: status={response.status_code}, body={response.text[:500]}"
+                if response.status_code in {429, 503} and attempt < MAX_RETRIES:
+                    last_error = detail
+                    logger.warning("%s (attempt %d)", detail, attempt)
+                    time.sleep(min(3.0, 1.5 * attempt))
+                    continue
+
+                raise HTTPException(status_code=500, detail=detail)
 
             data = response.json()
             logger.debug("Ollama response received (%d chars)", len(data.get("response", "")))

@@ -22,7 +22,14 @@ from dataclasses import dataclass
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.config import CHUNK_SIZE, CHUNK_OVERLAP
+from app.config import (
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    LARGE_FILE_FAST_MODE,
+    LARGE_FILE_PAGE_THRESHOLD,
+    LARGE_FILE_CHUNK_SIZE,
+    LARGE_FILE_CHUNK_OVERLAP,
+)
 
 logger = logging.getLogger("tilon.chunker")
 
@@ -42,6 +49,22 @@ class Section:
     content: str
     breadcrumb: str
     is_table: bool = False
+
+
+def _resolve_chunk_params(base_meta: dict) -> Tuple[int, int]:
+    """Use larger chunks for very large documents to reduce embedding workload."""
+    page_total = 0
+    try:
+        page_total = int(base_meta.get("page_total") or 0)
+    except Exception:
+        page_total = 0
+
+    if LARGE_FILE_FAST_MODE and page_total >= LARGE_FILE_PAGE_THRESHOLD:
+        chunk_size = max(CHUNK_SIZE, LARGE_FILE_CHUNK_SIZE)
+        chunk_overlap = min(max(0, LARGE_FILE_CHUNK_OVERLAP), max(0, chunk_size - 1))
+        return chunk_size, chunk_overlap
+
+    return CHUNK_SIZE, CHUNK_OVERLAP
 
 
 def _split_by_headings(text: str) -> List[Section]:
@@ -84,13 +107,13 @@ def _extract_tables(text: str) -> Tuple[str, List[str]]:
     return remaining, tables
 
 
-def _split_paragraphs(text: str) -> List[str]:
+def _split_paragraphs(text: str, chunk_size: int) -> List[str]:
     """Split by paragraphs, group small ones together."""
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
     grouped, current, current_len = [], [], 0
 
     for para in paragraphs:
-        if current_len + len(para) > CHUNK_SIZE and current:
+        if current_len + len(para) > chunk_size and current:
             grouped.append("\n\n".join(current))
             current, current_len = [para], len(para)
         else:
@@ -101,10 +124,11 @@ def _split_paragraphs(text: str) -> List[str]:
     return grouped
 
 
-def _char_split(text: str) -> List[str]:
+def _char_split(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
     """Fallback character-based split with Korean separators."""
     return RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         separators=_KOREAN_SEPARATORS,
     ).split_text(text)
 
@@ -125,7 +149,13 @@ def _make_chunk(text, metadata, idx, section_title="", breadcrumb="", chunk_type
     )
 
 
-def _chunk_section(section: Section, base_meta: dict, start_idx: int) -> List[Document]:
+def _chunk_section(
+    section: Section,
+    base_meta: dict,
+    start_idx: int,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[Document]:
     """Chunk one section: tables → independent, text → whole or split."""
     chunks = []
     if not section.content.strip():
@@ -135,7 +165,7 @@ def _chunk_section(section: Section, base_meta: dict, start_idx: int) -> List[Do
 
     # Table chunks
     for table in tables:
-        pieces = [table] if len(table) <= CHUNK_SIZE else _char_split(table)
+        pieces = [table] if len(table) <= chunk_size else _char_split(table, chunk_size, chunk_overlap)
         for piece in pieces:
             chunks.append(_make_chunk(
                 piece, base_meta, start_idx + len(chunks),
@@ -146,14 +176,14 @@ def _chunk_section(section: Section, base_meta: dict, start_idx: int) -> List[Do
     if not remaining.strip():
         return chunks
 
-    if len(remaining) <= CHUNK_SIZE:
+    if len(remaining) <= chunk_size:
         chunks.append(_make_chunk(
             remaining, base_meta, start_idx + len(chunks),
             section.heading, section.breadcrumb, "section",
         ))
     else:
-        for para in _split_paragraphs(remaining):
-            pieces = [para] if len(para) <= CHUNK_SIZE else _char_split(para)
+        for para in _split_paragraphs(remaining, chunk_size):
+            pieces = [para] if len(para) <= chunk_size else _char_split(para, chunk_size, chunk_overlap)
             for piece in pieces:
                 chunks.append(_make_chunk(
                     piece, base_meta, start_idx + len(chunks),
@@ -173,13 +203,22 @@ def chunk_documents(docs: List[Document]) -> List[Document]:
     """
     all_chunks: List[Document] = []
     total_sections = 0
+    fast_chunk_docs = 0
 
     for doc in docs:
         text = doc.page_content
         # Copy metadata without chunk-specific fields
-        base_meta = {k: v for k, v in doc.metadata.items()
-                     if k not in ("chunk_index", "chunk_id", "chunk_chars",
-                                  "chunk_type", "section_breadcrumb", "timestamp")}
+        base_meta = {
+            k: v for k, v in doc.metadata.items()
+            if k not in (
+                "chunk_index", "chunk_id", "chunk_chars",
+                "chunk_type", "section_breadcrumb", "timestamp",
+            )
+        }
+
+        chunk_size, chunk_overlap = _resolve_chunk_params(base_meta)
+        if chunk_size != CHUNK_SIZE:
+            fast_chunk_docs += 1
 
         has_headings = bool(_HEADING_RE.search(text))
 
@@ -187,27 +226,35 @@ def chunk_documents(docs: List[Document]) -> List[Document]:
             sections = _split_by_headings(text)
             total_sections += len(sections)
             for section in sections:
-                all_chunks.extend(_chunk_section(section, base_meta, len(all_chunks)))
+                all_chunks.extend(
+                    _chunk_section(
+                        section,
+                        base_meta,
+                        len(all_chunks),
+                        chunk_size,
+                        chunk_overlap,
+                    )
+                )
         else:
             # No headings — paragraph-based
             remaining, tables = _extract_tables(text)
             section_title = base_meta.get("section_title", "")
 
             for table in tables:
-                pieces = [table] if len(table) <= CHUNK_SIZE else _char_split(table)
+                pieces = [table] if len(table) <= chunk_size else _char_split(table, chunk_size, chunk_overlap)
                 for piece in pieces:
                     all_chunks.append(_make_chunk(
                         piece, base_meta, len(all_chunks), section_title, "", "table",
                     ))
 
             if remaining.strip():
-                if len(remaining) <= CHUNK_SIZE:
+                if len(remaining) <= chunk_size:
                     all_chunks.append(_make_chunk(
                         remaining, base_meta, len(all_chunks), section_title, "", "page",
                     ))
                 else:
-                    for para in _split_paragraphs(remaining):
-                        pieces = [para] if len(para) <= CHUNK_SIZE else _char_split(para)
+                    for para in _split_paragraphs(remaining, chunk_size):
+                        pieces = [para] if len(para) <= chunk_size else _char_split(para, chunk_size, chunk_overlap)
                         for piece in pieces:
                             all_chunks.append(_make_chunk(
                                 piece, base_meta, len(all_chunks), section_title, "", "paragraph",
@@ -222,4 +269,14 @@ def chunk_documents(docs: List[Document]) -> List[Document]:
         "Semantic chunking: %d docs → %d sections → %d chunks | %s",
         len(docs), total_sections, len(all_chunks), types,
     )
+
+    if fast_chunk_docs > 0:
+        logger.info(
+            "Large-file chunk profile applied to %d/%d docs (chunk_size=%d, overlap=%d)",
+            fast_chunk_docs,
+            len(docs),
+            LARGE_FILE_CHUNK_SIZE,
+            LARGE_FILE_CHUNK_OVERLAP,
+        )
+
     return all_chunks

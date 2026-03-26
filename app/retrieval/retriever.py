@@ -44,6 +44,7 @@ def retrieve(
     source_filter: str = None,
     doc_id_filter: str = None,
     source_type_filter: str = None,
+    owner_id_filter: str = None,
     full_document: bool = False,
 ) -> RetrievalResult:
     """
@@ -54,7 +55,7 @@ def retrieve(
     "hello" doesn't return random document chunks.
     """
     if (source_filter or doc_id_filter) and full_document:
-        docs = get_documents_by_source(source=source_filter, doc_id=doc_id_filter)
+        docs = get_documents_by_source(source=source_filter, doc_id=doc_id_filter, owner_id=owner_id_filter)
         logger.info(
             "Loaded %d chunks for whole-document task from '%s'%s",
             len(docs),
@@ -79,6 +80,7 @@ def retrieve(
         filter_source=source_filter,
         filter_doc_id=doc_id_filter,
         filter_source_type=source_type_filter,
+        filter_owner_id=owner_id_filter,
         min_score=min_score,
     )
     keyword_results = search_keyword_index(
@@ -87,6 +89,7 @@ def retrieve(
         source_filter=source_filter,
         doc_id_filter=doc_id_filter,
         source_type_filter=source_type_filter,
+        owner_id_filter=owner_id_filter,
     )
 
     merged = _fuse_results(vector_results, keyword_results, limit=fetch_k)
@@ -99,6 +102,8 @@ def retrieve(
         scope_parts.append(f"doc_id='{doc_id_filter}'")
     if source_type_filter:
         scope_parts.append(f"source_type='{source_type_filter}'")
+    if owner_id_filter:
+        scope_parts.append(f"owner_id='{owner_id_filter}'")
     scope = f" (scoped to {', '.join(scope_parts)})" if scope_parts else ""
     logger.info(
         "Hybrid retrieval: %d vector + %d keyword -> %d merged for '%s'%s",

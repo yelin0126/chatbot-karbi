@@ -22,7 +22,7 @@ from typing import List, Dict, Any, Optional
 
 import fitz  # pymupdf
 import requests
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import pytesseract
 from pdf2image import convert_from_path
 from langchain_core.documents import Document
@@ -33,6 +33,9 @@ from app.config import (
     OLLAMA_BASE_URL,
     VLM_EXTRACTION_ENABLED,
     VLM_EXTRACTION_MODEL,
+    LARGE_FILE_FAST_MODE,
+    LARGE_FILE_PAGE_THRESHOLD,
+    LARGE_FILE_MAX_FALLBACK_PAGES,
 )
 
 logger = logging.getLogger("tilon.parser")
@@ -485,6 +488,69 @@ def _image_to_base64(image: Image.Image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+
+def _resample_lanczos() -> int:
+    """Return Pillow LANCZOS enum compatible across Pillow versions."""
+    resampling = getattr(Image, "Resampling", Image)
+    return getattr(resampling, "LANCZOS")
+
+
+def _prepare_image_for_ocr(image: Image.Image, min_width: int = 1800) -> Image.Image:
+    """Normalize orientation and upscale small images for better OCR accuracy."""
+    normalized = ImageOps.exif_transpose(image).convert("RGB")
+    width, height = normalized.size
+    if width > 0 and width < min_width:
+        scale = min_width / float(width)
+        resized = (min_width, max(1, int(height * scale)))
+        normalized = normalized.resize(resized, _resample_lanczos())
+    return normalized
+
+
+def _extract_with_tesseract_variants(image: Image.Image) -> tuple:
+    """Run OCR with multiple preprocessing/config variants and keep the best result."""
+    candidates: List[tuple[str, str, float]] = []
+
+    grayscale = ImageOps.grayscale(image)
+    enhanced = ImageEnhance.Contrast(grayscale).enhance(1.8).filter(ImageFilter.SHARPEN)
+    binary = enhanced.point(lambda px: 255 if px >= 170 else 0)
+
+    variants = [
+        ("gray", grayscale),
+        ("enhanced", enhanced),
+        ("binary", binary),
+    ]
+    configs = [
+        "--oem 1 --psm 6",
+        "--oem 1 --psm 4",
+        "--oem 1 --psm 11",
+    ]
+
+    for variant_name, variant in variants:
+        for config in configs:
+            try:
+                raw = pytesseract.image_to_string(variant, lang="kor+eng", config=config)
+            except Exception as e:
+                logger.debug("Image OCR variant failed (%s, %s): %s", variant_name, config, e)
+                continue
+
+            normalized = _normalize_extracted_text(raw or "")
+            if len(normalized) < 10:
+                continue
+
+            score = _score_extraction_candidate(normalized, "ocr_image", "scanned")
+            candidates.append((normalized, f"{variant_name}:{config}", score))
+
+    if not candidates:
+        return "", "ocr_image"
+
+    best_text, best_variant, best_score = max(candidates, key=lambda item: item[2])
+    logger.debug(
+        "Image OCR best variant selected: %s (score=%.2f)",
+        best_variant,
+        best_score,
+    )
+    return best_text, "ocr_image"
+
 def _score_extraction_candidate(
     text: str,
     method: str,
@@ -882,6 +948,7 @@ def _parse_pdf_page(
     page: fitz.Page,
     pdf_path: str,
     artifact_meta: Dict[str, Any],
+    allow_fallback: bool = True,
 ) -> Optional[Document]:
     """Parse one PDF page with quality-gated routing."""
     page_num = page.number + 1
@@ -902,6 +969,12 @@ def _parse_pdf_page(
         )
 
     if not _needs_page_fallback(page_analysis):
+        return candidates[0] if candidates else None
+
+    if not allow_fallback:
+        if candidates:
+            candidates[0].metadata["routing_reason"] = "fast_text_layer_no_fallback"
+            candidates[0].metadata["fallback_chain"] = "pymupdf"
         return candidates[0] if candidates else None
 
     route_reasons = []
@@ -999,8 +1072,24 @@ def parse_pdf(pdf_path: str) -> List[Document]:
     page_docs: List[Document] = []
     method_counts: Dict[str, int] = {}
 
+    fast_large_pdf = LARGE_FILE_FAST_MODE and total_pages >= LARGE_FILE_PAGE_THRESHOLD
+    fallback_page_limit = LARGE_FILE_MAX_FALLBACK_PAGES if fast_large_pdf else total_pages
+    skipped_fallback_pages = 0
+
+    if fast_large_pdf:
+        logger.info(
+            "  -> Large-PDF fast mode enabled: %d pages (fallback only first %d pages)",
+            total_pages,
+            fallback_page_limit,
+        )
+
     for page in pdf_doc:
-        selected = _parse_pdf_page(page, pdf_path, artifact_meta)
+        page_num = page.number + 1
+        allow_fallback = (not fast_large_pdf) or (page_num <= fallback_page_limit)
+        if fast_large_pdf and not allow_fallback:
+            skipped_fallback_pages += 1
+
+        selected = _parse_pdf_page(page, pdf_path, artifact_meta, allow_fallback=allow_fallback)
         if selected is None:
             continue
         page_docs.append(selected)
@@ -1025,6 +1114,9 @@ def parse_pdf(pdf_path: str) -> List[Document]:
         method_counts or {},
         page_kind_counts or {},
     )
+    if fast_large_pdf and skipped_fallback_pages > 0:
+        logger.info("  -> Fast mode skipped VLM/OCR fallback on %d pages for speed", skipped_fallback_pages)
+
 
     if page_docs:
         low_quality_pages = [
@@ -1110,28 +1202,43 @@ def parse_pdf(pdf_path: str) -> List[Document]:
 
 def extract_text_from_image(image_path: str) -> tuple:
     """
-    OCR an image file. Uses VLM if available, else tesseract.
-    Returns (text, method) tuple so caller knows which method succeeded.
+    OCR an image file by comparing VLM and OCR candidates.
+    Returns (text, method) where method is 'vlm' or 'ocr_image'.
     """
+    try:
+        with Image.open(image_path) as opened_image:
+            prepared = _prepare_image_for_ocr(opened_image)
+    except Exception as e:
+        logger.warning("Image open failed for %s: %s", image_path, e)
+        return "", "none"
+
+    candidates: List[tuple[str, str, float]] = []
+
     if VLM_EXTRACTION_ENABLED:
         try:
-            image = Image.open(image_path)
-            img_b64 = _image_to_base64(image)
-
-            text = _vlm_extract_page(img_b64, 1)
-            if text and len(text.strip()) > 10:
-                return text, "vlm"
+            img_b64 = _image_to_base64(prepared)
+            vlm_raw = _vlm_extract_page(img_b64, 1, timeout=max(_VLM_FIRST_PAGE_TIMEOUT, _VLM_PAGE_TIMEOUT))
+            vlm_text = _normalize_extracted_text(vlm_raw)
+            if len(vlm_text) >= 10:
+                vlm_score = _score_extraction_candidate(vlm_text, "vlm", "scanned")
+                candidates.append((vlm_text, "vlm", vlm_score))
         except Exception as e:
-            logger.debug("VLM image extraction failed, falling back to tesseract: %s", e)
+            logger.debug("VLM image extraction failed, falling back to OCR variants: %s", e)
 
-    # Fallback to tesseract
-    try:
-        image = Image.open(image_path)
-        text = pytesseract.image_to_string(image, lang="kor+eng")
-        return (text or "").strip(), "ocr_image"
-    except Exception as e:
-        logger.warning("Image OCR failed for %s: %s", image_path, e)
+    if ENABLE_OCR:
+        try:
+            ocr_text, ocr_method = _extract_with_tesseract_variants(prepared)
+            if len(ocr_text) >= 10:
+                ocr_score = _score_extraction_candidate(ocr_text, "ocr_image", "scanned")
+                candidates.append((ocr_text, ocr_method, ocr_score))
+        except Exception as e:
+            logger.debug("Image OCR variants failed for %s: %s", image_path, e)
+
+    if not candidates:
         return "", "none"
+
+    best_text, best_method, _ = max(candidates, key=lambda item: item[2])
+    return best_text, best_method
 
 
 def parse_image(image_path: str) -> List[Document]:

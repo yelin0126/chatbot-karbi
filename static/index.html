@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>사내 AI 어시스턴트</title>
+    <title>사내 틸론AI</title>
     <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -58,10 +58,13 @@
         .chat-list::-webkit-scrollbar-thumb { background: var(--border); }
 
         .shelf-wrap { padding: 0 8px 8px; }
-        .shelf-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-        .shelf-upload-btn { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); color: var(--ts); font-size: 12px; font-family: inherit; cursor: pointer; transition: all .2s; }
+        .shelf-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+        .shelf-upload-btn { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); color: var(--ts); font-size: 12px; font-family: inherit; cursor: pointer; transition: all .2s; }
         .shelf-upload-btn:hover { border-color: var(--accent); color: var(--accent); }
         .shelf-upload-btn:disabled { opacity: .6; cursor: not-allowed; }
+        .shelf-stop-btn { display: none; padding: 8px 10px; border: 1px solid #fecaca; border-radius: 6px; background: #fff1f2; color: #dc2626; font-size: 12px; font-family: inherit; cursor: pointer; white-space: nowrap; }
+        .shelf-stop-btn.show { display: inline-flex; align-items: center; justify-content: center; }
+        .shelf-stop-btn:hover { background: #ffe4e6; border-color: #fca5a5; }
         .shelf-list { max-height: 210px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fafbfd; padding: 6px; }
         .shelf-list::-webkit-scrollbar { width: 4px; }
         .shelf-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
@@ -74,6 +77,7 @@
         .shelf-del-btn { flex-shrink: 0; font-size: 11px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: #fff; color: var(--tm); cursor: pointer; font-family: inherit; }
         .shelf-del-btn:hover { border-color: var(--danger); color: var(--danger); background: #fff5f5; }
         .shelf-item-meta { margin-top: 4px; font-size: 11px; color: var(--tm); }
+        .shelf-count { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; color: var(--accent); background: rgba(37,99,235,0.10); border: 1px solid rgba(37,99,235,0.25); }
 
         .quick-menu { margin-top: auto; }
         .sb-footer { padding: 12px; border-top: 1px solid var(--border); }
@@ -100,6 +104,8 @@
         .msg-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
         .msg-sender { font-size: 14px; font-weight: 700; }
         .msg-sender.ai { color: var(--accent); }
+        .otter-mini { width: 15px; height: 15px; object-fit: contain; vertical-align: -2px; margin-right: 4px; border-radius: 0; }
+        .typing-label { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 13px; }
         .msg-time { font-size: 11px; color: var(--tm); }
         .copy-btn { opacity: 0; font-size: 11px; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg3); color: var(--ts); cursor: pointer; font-family: inherit; }
         .msg-group:hover .copy-btn { opacity: 1; }
@@ -163,7 +169,7 @@
     <div class="modal">
         <h3>⚙️ 시스템 프롬프트 설정</h3>
         <p>AI의 역할과 응답 방식을 지정하세요.</p>
-        <textarea id="sp-input" placeholder="예: 당신은 사내 법무팀 AI 어시스턴트입니다."></textarea>
+        <textarea id="sp-input" placeholder="예: 당신은 사내 법무팀 틸론AI입니다."></textarea>
         <div class="modal-btns">
             <button class="mbtn cancel" onclick="closeModal('sp-modal')">취소</button>
             <button class="mbtn save" onclick="savePrompt()">저장</button>
@@ -217,10 +223,11 @@
         <button class="new-btn" onclick="newChat()">＋ 새 채팅</button>
         <div class="chat-list" id="chat-list"></div>
 
-        <div class="sb-sec"><div class="sb-sec-title">업로드 파일 보관소</div></div>
+        <div class="sb-sec"><div class="sb-sec-title">업로드 파일 보관소 <span class="shelf-count" id="shelf-count">0개</span></div></div>
         <div class="shelf-wrap">
             <div class="shelf-head">
                 <button class="shelf-upload-btn" id="shelf-upload-btn" onclick="openShelfUpload()">📎 파일 업로드</button>
+                <button class="shelf-stop-btn" id="shelf-stop-btn" type="button" onclick="stopShelfUpload()">⏹ 중단</button>
             </div>
             <div class="shelf-list" id="shelf-list">
                 <div class="shelf-empty">업로드된 파일이 없습니다.</div>
@@ -279,18 +286,24 @@
         '직원1': { pw: '1234', role: '일반 직원' }
     };
 
-    const CHAT_KEY = 'ai_chats';
-    const DOC_KEY = 'ai_uploaded_docs';
+    const CHAT_KEY_PREFIX = 'ai_chats';
+    const DOC_KEY_PREFIX = 'ai_uploaded_docs';
+    const SYS_PROMPT_KEY_PREFIX = 'ai_sys_prompt';
     const MAX_SHELF_FILES = 90;
     const HISTORY_MAX_MESSAGES = 12;
+
+    const DEFAULT_SYSTEM_PROMPT = '당신은 사내 틸론AI입니다. 한국어로 친절하고 명확하게 답변하세요. 중국어(한자)는 절대 사용하지 마세요.';
 
     let currentUser = null;
     let isLoading = false;
     let abortController = null;
-    let systemPrompt = localStorage.getItem('ai_sys_prompt') || '당신은 사내 AI 어시스턴트입니다. 한국어로 친절하고 명확하게 답변하세요. 중국어(한자)는 절대 사용하지 마세요.';
-    let chats = normalizeChats(JSON.parse(localStorage.getItem(CHAT_KEY) || '[]'));
-    let uploadedDocs = normalizeDocs(JSON.parse(localStorage.getItem(DOC_KEY) || '[]'));
+    let systemPrompt = DEFAULT_SYSTEM_PROMPT;
+    let chats = [];
+    let uploadedDocs = [];
     let currentChatId = null;
+    let shelfUploadAbortController = null;
+    let shelfUploadInProgress = false;
+    let shelfUploadCancelRequested = false;
 
     function now() {
         return new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
@@ -312,8 +325,10 @@
         return list.map(chat => ({
             id: chat.id || ('c_' + Date.now()),
             title: chat.title || '새 채팅',
+            active_source: chat.active_source || null,
+            active_doc_id: chat.active_doc_id || null,
             messages: Array.isArray(chat.messages) ? chat.messages.map(m => ({
-                sender: m.sender || 'AI 어시스턴트',
+                sender: m.sender || '틸론AI',
                 text: m.text || '',
                 isUser: !!m.isUser,
                 hasScope: false
@@ -342,12 +357,25 @@
         return 'src:' + String(doc.source || '').toLowerCase();
     }
 
+    function userScopedKey(prefix) {
+        return currentUser ? `${prefix}:${currentUser.id}` : prefix;
+    }
+
+    function loadUserState() {
+        chats = normalizeChats(JSON.parse(localStorage.getItem(userScopedKey(CHAT_KEY_PREFIX)) || '[]'));
+        uploadedDocs = normalizeDocs(JSON.parse(localStorage.getItem(userScopedKey(DOC_KEY_PREFIX)) || '[]'));
+        systemPrompt = localStorage.getItem(userScopedKey(SYS_PROMPT_KEY_PREFIX)) || DEFAULT_SYSTEM_PROMPT;
+        currentChatId = chats.length ? chats[0].id : null;
+    }
+
     function saveChats() {
-        localStorage.setItem(CHAT_KEY, JSON.stringify(chats));
+        if (!currentUser) return;
+        localStorage.setItem(userScopedKey(CHAT_KEY_PREFIX), JSON.stringify(chats));
     }
 
     function saveDocs() {
-        localStorage.setItem(DOC_KEY, JSON.stringify(uploadedDocs));
+        if (!currentUser) return;
+        localStorage.setItem(userScopedKey(DOC_KEY_PREFIX), JSON.stringify(uploadedDocs));
     }
 
     function currentChat() {
@@ -386,6 +414,7 @@
         }
 
         currentUser = { id, role: u.role };
+        loadUserState();
         document.getElementById('li-err').style.display = 'none';
         document.getElementById('login-screen').style.display = 'none';
         document.getElementById('app').style.display = 'flex';
@@ -395,15 +424,22 @@
         document.getElementById('u-avatar').textContent = id[0].toUpperCase();
 
         if (chats.length === 0) newChat();
-        renderChatList();
-        loadChat(chats[0].id);
+        else {
+            renderChatList();
+            loadChat(chats[0].id);
+        }
         renderShelfDocs();
 
         await Promise.all([loadHealth(), syncDocsFromServer()]);
     }
 
     function doLogout() {
+        if (shelfUploadInProgress) stopShelfUpload();
         currentUser = null;
+        chats = [];
+        uploadedDocs = [];
+        currentChatId = null;
+        systemPrompt = DEFAULT_SYSTEM_PROMPT;
         document.getElementById('login-screen').style.display = 'flex';
         document.getElementById('app').style.display = 'none';
         document.getElementById('li-id').value = '';
@@ -438,15 +474,15 @@
     });
 
     function savePrompt() {
-        systemPrompt = document.getElementById('sp-input').value.trim() || '당신은 사내 AI 어시스턴트입니다. 한국어로 친절하고 명확하게 답변하세요. 중국어(한자)는 절대 사용하지 마세요.';
-        localStorage.setItem('ai_sys_prompt', systemPrompt);
+        systemPrompt = document.getElementById('sp-input').value.trim() || DEFAULT_SYSTEM_PROMPT;
+        if (currentUser) localStorage.setItem(userScopedKey(SYS_PROMPT_KEY_PREFIX), systemPrompt);
         closeModal('sp-modal');
         toast('✅ 시스템 프롬프트 저장됨');
     }
 
     function newChat() {
         const id = 'c_' + Date.now();
-        chats.unshift({ id, title: '새 채팅', messages: [] });
+        chats.unshift({ id, title: '새 채팅', active_source: null, active_doc_id: null, messages: [] });
         saveChats();
         renderChatList();
         loadChat(id);
@@ -467,9 +503,9 @@
 
         if (chat.messages.length === 0) {
             msgs.innerHTML = `<div class="welcome" id="welcome">
-                <img class="wi" src="/static/otter-mascot.png" alt="수달 마스코트">
+                <img class="wi" src="/static/otter-welcome.png?v=2" alt="수달 마스코트">
                 <h2>무엇을 도와드릴까요?</h2>
-                <p>왼쪽에서 업로드한 모든 파일을 기준으로 답변합니다. 파일을 여러 개 올린 뒤 바로 질문하세요.</p>
+                <p>업로드 파일이 있으면 참고하고, 일반 질문도 자연스럽게 이어서 답변합니다.</p>
                 <div class="quick-btns">
                     <button class="qb" onclick="quickMsg('오늘 할 일 정리해줘')">📝 할 일 정리</button>
                     <button class="qb" onclick="quickMsg('이메일 답변 작성해줘')">✉️ 이메일 작성</button>
@@ -540,7 +576,36 @@
     }
 
     function openShelfUpload() {
+        if (shelfUploadInProgress) {
+            toast('업로드 진행 중입니다. 중단 후 다시 시도하세요.');
+            return;
+        }
         document.getElementById('shelf-file').click();
+    }
+
+    function setShelfUploadProgress(done, total, currentFile) {
+        const btn = document.getElementById('shelf-upload-btn');
+        const stopBtn = document.getElementById('shelf-stop-btn');
+        btn.disabled = true;
+        btn.textContent = `⏳ 업로드 중... (${done}/${total})`;
+        btn.title = currentFile || '';
+        stopBtn.classList.add('show');
+    }
+
+    function resetShelfUploadProgress() {
+        const btn = document.getElementById('shelf-upload-btn');
+        const stopBtn = document.getElementById('shelf-stop-btn');
+        btn.disabled = false;
+        btn.textContent = '📎 파일 업로드';
+        btn.title = '';
+        stopBtn.classList.remove('show');
+    }
+
+    function stopShelfUpload() {
+        if (!shelfUploadInProgress) return;
+        shelfUploadCancelRequested = true;
+        if (shelfUploadAbortController) shelfUploadAbortController.abort();
+        toast('⏹ 업로드 중단 요청됨');
     }
 
     function upsertDoc(doc) {
@@ -558,7 +623,14 @@
         saveDocs();
     }
 
+    function updateShelfCount() {
+        const el = document.getElementById('shelf-count');
+        if (!el) return;
+        el.textContent = `${uploadedDocs.length}개`;
+    }
+
     function renderShelfDocs() {
+        updateShelfCount();
         const list = document.getElementById('shelf-list');
 
         if (!uploadedDocs.length) {
@@ -612,12 +684,25 @@
 
         try {
             const query = new URLSearchParams();
+            if (doc.doc_id) {
+                query.set('doc_id', doc.doc_id);
+            }
             query.set('source', doc.source);
-            if (doc.doc_id) query.set('doc_id', doc.doc_id);
 
+            if (currentUser?.id) query.set('user_id', currentUser.id);
             const res = await fetch(API + '/upload-document?' + query.toString(), { method: 'DELETE' });
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || '삭제 실패');
+            if (!res.ok) {
+                if (res.status === 404) {
+                    uploadedDocs = uploadedDocs.filter(d => docKey(d) !== docKey(doc));
+                    saveDocs();
+                    renderShelfDocs();
+                    toast('서버에는 없어 목록에서만 제거했습니다.');
+                    await syncDocsFromServer();
+                    return;
+                }
+                throw new Error(data.detail || '삭제 실패');
+            }
 
             uploadedDocs = uploadedDocs.filter(d => docKey(d) !== docKey(doc));
 
@@ -635,7 +720,9 @@
 
     async function syncDocsFromServer() {
         try {
-            const res = await fetch(API + '/docs-list');
+            const query = new URLSearchParams();
+            if (currentUser?.id) query.set('user_id', currentUser.id);
+            const res = await fetch(API + '/docs-list' + (query.toString() ? ('?' + query.toString()) : ''));
             if (!res.ok) return;
             const data = await res.json();
             const grouped = new Map();
@@ -664,36 +751,55 @@
         let files = Array.from((input && input.files) || []);
         input.value = '';
         if (!files.length) return;
+        if (shelfUploadInProgress) {
+            toast('이미 업로드가 진행 중입니다.');
+            return;
+        }
 
         if (files.length > MAX_SHELF_FILES) {
             files = files.slice(0, MAX_SHELF_FILES);
             toast(`한 번에 최대 ${MAX_SHELF_FILES}개까지 업로드합니다. 앞의 ${MAX_SHELF_FILES}개만 처리합니다.`);
         }
 
-        const btn = document.getElementById('shelf-upload-btn');
-        btn.disabled = true;
-        btn.textContent = `⏳ 업로드 중... (0/${files.length})`;
+        shelfUploadInProgress = true;
+        shelfUploadCancelRequested = false;
+        shelfUploadAbortController = null;
+        setShelfUploadProgress(0, files.length, '');
 
         let ok = 0;
         let failed = 0;
+        let completed = 0;
+        let canceled = false;
         const failedReasons = [];
 
         try {
             for (let i = 0; i < files.length; i++) {
+                if (shelfUploadCancelRequested) {
+                    canceled = true;
+                    break;
+                }
                 const file = files[i];
-                btn.textContent = `⏳ 업로드 중... (${i + 1}/${files.length})`;
+                setShelfUploadProgress(completed, files.length, file.name);
 
                 try {
                     const fd = new FormData();
                     fd.append('file', file);
+                    if (currentUser?.id) fd.append('user_id', currentUser.id);
+                    shelfUploadAbortController = new AbortController();
 
-                    const res = await fetch(API + '/upload', { method: 'POST', body: fd });
+                    const res = await fetch(API + '/upload', {
+                        method: 'POST',
+                        body: fd,
+                        signal: shelfUploadAbortController.signal
+                    });
                     const data = await res.json().catch(() => ({}));
 
                     if (!res.ok) {
                         failed += 1;
                         const reason = data.detail || `${res.status} ${res.statusText}`;
                         failedReasons.push(`${file.name}: ${reason}`);
+                        completed += 1;
+                        setShelfUploadProgress(completed, files.length, file.name);
                         continue;
                     }
 
@@ -701,6 +807,8 @@
                     if (chunks <= 0) {
                         failed += 1;
                         failedReasons.push(`${file.name}: 텍스트 추출 실패`);
+                        completed += 1;
+                        setShelfUploadProgress(completed, files.length, file.name);
                         continue;
                     }
 
@@ -712,12 +820,21 @@
                     };
                     upsertDoc(doc);
                     ok += 1;
+                    completed += 1;
+                    setShelfUploadProgress(completed, files.length, file.name);
                 } catch (err) {
+                    if (err && err.name === 'AbortError' && shelfUploadCancelRequested) {
+                        canceled = true;
+                        break;
+                    }
                     failed += 1;
                     failedReasons.push(`${file.name}: ${err.message}`);
+                    completed += 1;
+                    setShelfUploadProgress(completed, files.length, file.name);
+                } finally {
+                    shelfUploadAbortController = null;
                 }
             }
-
 
             if (ok > 0) {
                 await syncDocsFromServer();
@@ -725,7 +842,13 @@
 
             renderShelfDocs();
 
-            if (ok > 0) toast(`✅ 업로드 완료: ${ok}개 파일`);
+            if (canceled) {
+                const canceledCount = Math.max(0, files.length - completed);
+                toast(`⏹ 업로드 중단: 저장 ${ok}개, 취소 ${canceledCount}개`);
+            } else if (ok > 0) {
+                toast(`✅ 업로드 완료: ${ok}개 파일`);
+            }
+
             if (failed > 0) {
                 const preview = failedReasons.slice(0, 2).join(' | ');
                 const suffix = failedReasons.length > 2 ? ` 외 ${failedReasons.length - 2}개` : '';
@@ -733,8 +856,10 @@
                 console.warn('Upload failed details:', failedReasons);
             }
         } finally {
-            btn.disabled = false;
-            btn.textContent = '📎 파일 업로드';
+            shelfUploadAbortController = null;
+            shelfUploadInProgress = false;
+            shelfUploadCancelRequested = false;
+            resetShelfUploadProgress();
         }
     }
 
@@ -747,6 +872,42 @@
         document.getElementById('send-btn').disabled = false;
         document.getElementById('stop-btn').style.display = 'none';
         toast('⏹ 응답 중지됨');
+    }
+
+    function isDocumentIntent(text) {
+        const q = String(text || '').toLowerCase();
+        const keywords = [
+            '문서', '파일', '첨부', '업로드', 'pdf', '페이지', '쪽', '본문', '원문',
+            '가사', '요약', '정리', '출처', '근거', '텍스트 추출', '텍스트만', '전문', '다 뽑',
+            'document', 'file', 'upload', 'pdf', 'page', 'source', 'quote', 'lyrics',
+            'summarize', 'summary', 'extract', 'transcribe'
+        ];
+        return keywords.some(k => q.includes(k));
+    }
+
+    function isDocumentFollowup(text) {
+        const q = String(text || '').toLowerCase().trim();
+        const hints = ['그 부분', '위 내용', '방금', '그거', '거기', '다시', '이어', '계속'];
+        return q.length <= 20 && hints.some(k => q.includes(k));
+    }
+
+    function isGeneralChatOverride(text) {
+        const q = String(text || '').toLowerCase();
+        const keywords = [
+            '문서 말고', '파일 말고', '업로드 말고', '일반 대화', '새 주제', '주제 바꿔',
+            '그거 말고', '문서와 상관없이',
+            'not about file', 'ignore file', 'new topic', 'general chat'
+        ];
+        return keywords.some(k => q.includes(k));
+    }
+
+    function shouldUseUploadScope(chat, text) {
+        if (!uploadedDocs.length) return false;
+        if (isGeneralChatOverride(text)) return false;
+        if (isDocumentIntent(text)) return true;
+        if (chat.active_source || chat.active_doc_id) return true;
+        if (isDocumentFollowup(text)) return true;
+        return false;
     }
 
     async function sendMsg() {
@@ -782,12 +943,16 @@
         abortController = new AbortController();
 
         try {
+            const useUploadScope = shouldUseUploadScope(chat, text);
             const payload = {
                 message: text,
                 system_prompt: systemPrompt,
                 history: buildHistoryForAPI(chat.messages.slice(0, -1)),
-                active_source_type: uploadedDocs.length > 0 ? 'upload' : null,
-                web_search_enabled: true
+                active_source: useUploadScope ? (chat.active_source || null) : null,
+                active_doc_id: useUploadScope ? (chat.active_doc_id || null) : null,
+                active_source_type: useUploadScope ? 'upload' : null,
+                web_search_enabled: true,
+                user_id: currentUser ? currentUser.id : null
             };
 
             const res = await fetch(API + '/chat', {
@@ -800,13 +965,27 @@
             removeTyping(tid);
 
             if (!res.ok) {
-                renderMsg('AI 어시스턴트', '⚠️ 서버 오류가 발생했습니다.', false, false, true);
+                let detail = '';
+                try {
+                    const errPayload = await res.json();
+                    detail = String(errPayload.detail || errPayload.message || '').trim();
+                } catch {}
+                const suffix = detail ? (' | ' + detail) : '';
+                renderMsg('틸론AI', '⚠️ 서버 오류가 발생했습니다.' + suffix, false, false, true);
             } else {
                 const d = await res.json();
                 const answer = d.answer || d.reply || '응답이 비어 있습니다.';
 
-                const hasScope = false;
-                const aMsg = { sender: 'AI 어시스턴트', text: answer, isUser: false, hasScope };
+                if (useUploadScope) {
+                    chat.active_source = d.active_source || chat.active_source || null;
+                    chat.active_doc_id = d.active_doc_id || chat.active_doc_id || null;
+                } else {
+                    chat.active_source = null;
+                    chat.active_doc_id = null;
+                }
+
+                const hasScope = !!(chat.active_source || chat.active_doc_id);
+                const aMsg = { sender: '틸론AI', text: answer, isUser: false, hasScope };
                 chat.messages.push(aMsg);
                 saveChats();
                 renderMsg(aMsg.sender, aMsg.text, false, hasScope, true);
@@ -814,9 +993,9 @@
         } catch (err) {
             removeTyping(tid);
             if (err.name === 'AbortError') {
-                renderMsg('AI 어시스턴트', '⏹ 응답이 중지되었습니다.', false, false, true);
+                renderMsg('틸론AI', '⏹ 응답이 중지되었습니다.', false, false, true);
             } else {
-                renderMsg('AI 어시스턴트', '⚠️ 서버에 연결할 수 없습니다.\n' + API + ' 확인하세요.', false, false, true);
+                renderMsg('틸론AI', '⚠️ 서버에 연결할 수 없습니다.\n' + API + ' 확인하세요.', false, false, true);
             }
         }
 
@@ -833,7 +1012,7 @@
         g.className = 'msg-group';
         g.innerHTML = `
             <div class="msg-meta">
-                <span class="msg-sender ${isUser ? '' : 'ai'}">${isUser ? esc(sender) : '🤖 ' + esc(sender)}</span>
+                <span class="msg-sender ${isUser ? '' : 'ai'}">${isUser ? esc(sender) : '<img class="otter-mini" src="/static/otter-mascot.png?v=2" alt="수달">' + esc(sender)}</span>
                 <span class="msg-time">${now()}</span>
                 <button class="copy-btn" onclick="copyMsg(this)">복사</button>
             </div>
@@ -856,7 +1035,7 @@
         const el = document.createElement('div');
         el.id = id;
         el.className = 'typing';
-        el.innerHTML = `<span style="color:var(--accent);font-size:13px">🤖 AI 어시스턴트</span>
+        el.innerHTML = `<span class="typing-label"><img class="otter-mini" src="/static/otter-mascot.png?v=2" alt="수달">틸론AI</span>
             <div class="dots"><span></span><span></span><span></span></div>`;
         msgs.appendChild(el);
         msgs.scrollTop = msgs.scrollHeight;
