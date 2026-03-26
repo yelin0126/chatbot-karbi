@@ -9,6 +9,7 @@ IMPROVEMENTS over original:
 """
 
 import logging
+import re
 import time
 from threading import BoundedSemaphore
 from typing import Dict, Any, Optional
@@ -50,6 +51,54 @@ def _acquire_ollama_slot(model: str) -> None:
 
     if waited >= 0.25:
         logger.info("Ollama queue wait %.2fs (model=%s)", waited, model)
+
+
+def _extract_ollama_error_text(response: requests.Response) -> str:
+    """Return the most useful error text from an Ollama HTTP response."""
+    try:
+        data = response.json()
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])
+    except Exception:
+        pass
+    return (response.text or "").strip()
+
+
+def _raise_ollama_http_error(response: requests.Response, model: str) -> None:
+    """Convert Ollama HTTP failures into clearer FastAPI errors."""
+    error_text = _extract_ollama_error_text(response)
+    lowered = error_text.lower()
+
+    if "requires more system memory" in lowered:
+        required = available = None
+        match = re.search(
+            r"requires more system memory \(([^)]+)\) than is available \(([^)]+)\)",
+            error_text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            required, available = match.groups()
+
+        detail = (
+            f"Ollama could not load model '{model}' because the machine does not have "
+            "enough free memory."
+        )
+        if required and available:
+            detail += f" Required: {required}. Available: {available}."
+        detail += " Choose a smaller model or run this request on the GPU environment."
+        raise HTTPException(status_code=503, detail=detail)
+
+    if "not found" in lowered and "model" in lowered:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Ollama model '{model}' is not available locally. "
+                "Pull the model first or choose a different model."
+            ),
+        )
+
+    detail = f"Ollama error while calling model '{model}': {error_text[:500]}"
+    raise HTTPException(status_code=500, detail=detail)
 
 
 def call_ollama(
@@ -94,14 +143,18 @@ def call_ollama(
                 _OLLAMA_GATE.release()
 
             if response.status_code != 200:
-                detail = f"Ollama error: status={response.status_code}, body={response.text[:500]}"
-                if response.status_code in {429, 503} and attempt < MAX_RETRIES:
+                detail = _extract_ollama_error_text(response)
+                if (
+                    response.status_code in {429, 503}
+                    and "requires more system memory" not in detail.lower()
+                    and attempt < MAX_RETRIES
+                ):
                     last_error = detail
                     logger.warning("%s (attempt %d)", detail, attempt)
                     time.sleep(min(3.0, 1.5 * attempt))
                     continue
 
-                raise HTTPException(status_code=500, detail=detail)
+                _raise_ollama_http_error(response, model)
 
             data = response.json()
             logger.debug("Ollama response received (%d chars)", len(data.get("response", "")))
