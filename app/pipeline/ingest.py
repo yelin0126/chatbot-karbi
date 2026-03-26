@@ -1,32 +1,37 @@
 """
-Document ingestion orchestrator — scan folder, parse, chunk, store.
+Document ingestion orchestrator: scan folder, parse, chunk, and store.
 
-IMPROVEMENTS over original:
-- Skips already-ingested files (original re-ingested duplicates every time)
+Improvements over the original version:
+- Skips already-ingested files
 - Returns detailed per-file status
-- Separated orchestration from parsing/chunking
-- NEW: Single-file ingestion for upload endpoint
+- Separates orchestration from parsing/chunking
+- Supports single-file ingestion for the upload endpoint
 """
 
 import glob
 import logging
+import time
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 from langchain_core.documents import Document
 
 from app.config import LIBRARY_DIR
 from app.core.document_registry import infer_source_type, upsert_document
-from app.pipeline.parser import parse_pdf, parse_image
+from app.core.vectorstore import add_documents, get_ingested_sources
 from app.pipeline.chunker import chunk_documents
 from app.pipeline.enricher import enrich_chunks
-from app.core.vectorstore import add_documents, get_ingested_sources
+from app.pipeline.parser import parse_image, parse_pdf
 
 logger = logging.getLogger("tilon.ingest")
 
 
-def _annotate_source_identity(docs: List[Document], file_path: Path, owner_id: str = None) -> List[Document]:
-    """Add source-type metadata before chunking so identity survives downstream."""
+def _annotate_source_identity(
+    docs: List[Document],
+    file_path: Path,
+    owner_id: str = None,
+) -> List[Document]:
+    """Add source identity metadata before chunking so it survives downstream."""
     source_type = infer_source_type(file_path)
     doc_scope = "persistent" if source_type == "library" else "chat_upload"
     annotated = []
@@ -45,10 +50,6 @@ def _annotate_source_identity(docs: List[Document], file_path: Path, owner_id: s
     return annotated
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Single File Ingestion (NEW — for /upload endpoint)
-# ═══════════════════════════════════════════════════════════════════════
-
 def ingest_single_file(file_path: Path, owner_id: str = None) -> Dict[str, Any]:
     """
     Parse, chunk, and store a single file into the vectorstore.
@@ -61,8 +62,9 @@ def ingest_single_file(file_path: Path, owner_id: str = None) -> Dict[str, Any]:
     name = file_path.name
 
     logger.info("Ingesting single file: %s", name)
+    started_at = time.perf_counter()
 
-    # Parse based on file type
+    parse_started_at = time.perf_counter()
     if ext == ".pdf":
         docs = parse_pdf(str(file_path))
     elif ext in (".png", ".jpg", ".jpeg", ".webp"):
@@ -73,24 +75,44 @@ def ingest_single_file(file_path: Path, owner_id: str = None) -> Dict[str, Any]:
             "count": 0,
             "file": name,
         }
+    parse_seconds = time.perf_counter() - parse_started_at
 
     docs = _annotate_source_identity(docs, file_path, owner_id=owner_id)
 
     if not docs:
         return {
-            "message": f"Could not extract text from {name}. "
-                       "The file may be a scanned image — check if OCR is enabled.",
+            "message": (
+                f"Could not extract text from {name}. "
+                "The file may be a scanned image; check whether OCR is enabled."
+            ),
             "count": 0,
             "file": name,
         }
 
-    # Chunk, enrich, and store
+    chunk_started_at = time.perf_counter()
     chunks = chunk_documents(docs)
+    chunk_seconds = time.perf_counter() - chunk_started_at
+
+    enrich_started_at = time.perf_counter()
     chunks = enrich_chunks(chunks)
+    enrich_seconds = time.perf_counter() - enrich_started_at
+
+    store_started_at = time.perf_counter()
     add_documents(chunks)
     registry_entry = upsert_document(file_path, docs, len(chunks), owner_id=owner_id)
+    store_seconds = time.perf_counter() - store_started_at
+    total_seconds = time.perf_counter() - started_at
 
-    logger.info("Ingested %s → %d chunks", name, len(chunks))
+    logger.info(
+        "Ingested %s -> %d chunks (parse=%.2fs, chunk=%.2fs, enrich=%.2fs, store=%.2fs, total=%.2fs)",
+        name,
+        len(chunks),
+        parse_seconds,
+        chunk_seconds,
+        enrich_seconds,
+        store_seconds,
+        total_seconds,
+    )
 
     return {
         "message": f"Successfully ingested {name}: {len(chunks)} chunks stored.",
@@ -98,6 +120,13 @@ def ingest_single_file(file_path: Path, owner_id: str = None) -> Dict[str, Any]:
         "file": name,
         "doc_id": registry_entry.get("doc_id") if registry_entry else None,
         "source_type": registry_entry.get("source_type") if registry_entry else None,
+        "timings": {
+            "parse_seconds": round(parse_seconds, 2),
+            "chunk_seconds": round(chunk_seconds, 2),
+            "enrich_seconds": round(enrich_seconds, 2),
+            "store_seconds": round(store_seconds, 2),
+            "total_seconds": round(total_seconds, 2),
+        },
     }
 
 
@@ -109,14 +138,9 @@ def ingest_folder(folder_path: Path = None) -> Dict[str, Any]:
     folder = folder_path or LIBRARY_DIR
     folder.mkdir(parents=True, exist_ok=True)
 
-    # IMPROVEMENT: check which files are already ingested
     already_ingested = get_ingested_sources()
-    logger.info(
-        "Ingesting from %s — %d files already in DB",
-        folder, len(already_ingested),
-    )
+    logger.info("Ingesting from %s -> %d files already in DB", folder, len(already_ingested))
 
-    # Collect files
     pdf_files = sorted(glob.glob(str(folder / "*.pdf")))
     image_files = []
     for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):

@@ -391,6 +391,7 @@ async def upload_file(file: UploadFile = File(...), user_id: Optional[str] = For
             "chunks_stored": result["count"],
             "doc_id": result.get("doc_id"),
             "source_type": result.get("source_type"),
+            "timings": result.get("timings"),
         }
     except HTTPException:
         raise
