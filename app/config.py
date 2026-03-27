@@ -38,10 +38,10 @@ AVAILABLE_MODELS = os.getenv(
     "AVAILABLE_MODELS",
     "qwen2.5:7b,llama3.1:latest,llama3.2-vision:11b",
 ).split(",")
-LOCAL_LLM_MODEL_NAME = os.getenv("LOCAL_LLM_MODEL_NAME", "qwen25-qlora-v6")
+LOCAL_LLM_MODEL_NAME = os.getenv("LOCAL_LLM_MODEL_NAME", "qwen25-qlora-v9")
 LOCAL_LLM_ADAPTER_PATH = os.getenv(
     "LOCAL_LLM_ADAPTER_PATH",
-    str(BASE_DIR / "finetuning" / "output" / "qwen25-qlora-v6"),
+    str(BASE_DIR / "finetuning" / "output" / "qwen25-qlora-v9"),
 )
 LOCAL_LLM_BASE_MODEL = os.getenv("LOCAL_LLM_BASE_MODEL", "").strip()
 LOCAL_LLM_LOCAL_FILES_ONLY = os.getenv("LOCAL_LLM_LOCAL_FILES_ONLY", "true").lower() == "true"
@@ -49,9 +49,10 @@ LOCAL_LLM_LOAD_IN_4BIT = os.getenv("LOCAL_LLM_LOAD_IN_4BIT", "true").lower() == 
 LOCAL_LLM_MAX_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_MAX_INPUT_TOKENS", "4096"))
 LOCAL_LLM_OOM_RETRY_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_INPUT_TOKENS", "3072"))
 LOCAL_LLM_OOM_RETRY_MAX_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_MAX_TOKENS", "512"))
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))
+LLM_SUPPRESS_FOREIGN_SCRIPTS = os.getenv("LLM_SUPPRESS_FOREIGN_SCRIPTS", "true").lower() == "true"
 
 # ── Embedding ─────────────────────────────────────────────────────────
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -93,13 +94,37 @@ SCOPED_SMALL_DOC_FULL_CONTEXT_MAX_CHUNKS = int(
 )
 STRONG_KEYWORD_CONFIDENCE_FLOOR = float(os.getenv("STRONG_KEYWORD_CONFIDENCE_FLOOR", "0.65"))
 
+# ── Answer Guards (Phase 8) ───────────────────────────────────────────
+# Context-relevance: reranker score of (question, best_chunk).  Below this
+# threshold the retrieved context is considered off-topic and a "not found"
+# response is returned instead of generating an answer.
+CONTEXT_RELEVANCE_THRESHOLD = float(os.getenv("CONTEXT_RELEVANCE_THRESHOLD", "0.25"))
+
+# Tiered NLI faithfulness thresholds (post-generation):
+#   score < HARD → replace answer with "문서에서 확인되지 않습니다"
+#   HARD ≤ score < SOFT → append uncertainty disclaimer
+NLI_FAITHFULNESS_HARD_THRESHOLD = float(os.getenv("NLI_FAITHFULNESS_HARD_THRESHOLD", "0.15"))
+NLI_FAITHFULNESS_SOFT_THRESHOLD = float(os.getenv("NLI_FAITHFULNESS_SOFT_THRESHOLD", "0.35"))
+
 # ── Chunking ──────────────────────────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
+# Parent-child hierarchical chunking (Phase 1a accuracy upgrade)
+# Parent = full semantic section (~CHUNK_SIZE chars), stored for context expansion
+# Child  = smaller retrieval unit (~CHILD_CHUNK_SIZE chars), embedded & indexed
+CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "300"))
+CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "50"))
 
 # ── Features ──────────────────────────────────────────────────────────
 ENABLE_OCR = os.getenv("ENABLE_OCR", "true").lower() == "true"
+PADDLE_OCR_ENABLED = os.getenv("PADDLE_OCR_ENABLED", "true").lower() == "true"
 AUTO_INGEST_ON_STARTUP = os.getenv("AUTO_INGEST_ON_STARTUP", "false").lower() == "true"
+
+# ── Query Routing / Classifier (Phase 10B) ───────────────────────────
+QUERY_CLASSIFIER_ENABLED = os.getenv("QUERY_CLASSIFIER_ENABLED", "false").lower() == "true"
+QUERY_CLASSIFIER_PROVIDER = os.getenv("QUERY_CLASSIFIER_PROVIDER", "heuristic").strip().lower()
+QUERY_CLASSIFIER_MIN_CONFIDENCE = float(os.getenv("QUERY_CLASSIFIER_MIN_CONFIDENCE", "0.58"))
+QUERY_CLASSIFIER_SHADOW_MODE = os.getenv("QUERY_CLASSIFIER_SHADOW_MODE", "true").lower() == "true"
 
 # ── Web Search (NEW — original had mode but no actual search) ─────────
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")

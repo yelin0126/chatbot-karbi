@@ -1,0 +1,24 @@
+{"id":"route-001","intent":"smalltalk","language":"ko","question":"안녕하세요","notes":"basic greeting"}
+{"id":"route-002","intent":"smalltalk","language":"en","question":"thanks, that helps","notes":"acknowledgement"}
+{"id":"route-003","intent":"direct_extraction","language":"ko","question":"이 문서의 텍스트만 추출해줘","notes":"ocr raw text"}
+{"id":"route-004","intent":"direct_extraction","language":"en","question":"extract the text from this image","notes":"ocr english"}
+{"id":"route-005","intent":"factual_lookup","language":"ko","question":"제28장의 제목은 무엇입니까?","notes":"strict fact lookup"}
+{"id":"route-006","intent":"factual_lookup","language":"ko","question":"2005년 대총회에서 추가된 교리는 몇 장입니까?","notes":"history fact question"}
+{"id":"route-007","intent":"factual_lookup","language":"en","question":"what is the title of chapter 5","notes":"english title lookup"}
+{"id":"route-008","intent":"article_lookup","language":"ko","question":"제5조의 내용은 무엇입니까?","notes":"legal article lookup"}
+{"id":"route-009","intent":"article_lookup","language":"ko","question":"제12조 제2항을 알려줘","notes":"article paragraph lookup"}
+{"id":"route-010","intent":"article_lookup","language":"en","question":"show me article 7","notes":"english article lookup"}
+{"id":"route-011","intent":"summarization","language":"ko","question":"이 문서를 5문장으로 요약해줘","notes":"document summary"}
+{"id":"route-012","intent":"summarization","language":"ko","question":"차례를 기준으로 큰 구성 범주를 설명해줘","notes":"structure summary"}
+{"id":"route-013","intent":"summarization","language":"en","question":"give me an overview of this file","notes":"english summary"}
+{"id":"route-014","intent":"comparison","language":"ko","question":"이 두 문서의 차이점을 비교해줘","notes":"multi-document comparison"}
+{"id":"route-015","intent":"comparison","language":"ko","question":"제5조와 제7조의 차이는?","notes":"intra-doc comparison"}
+{"id":"route-016","intent":"comparison","language":"en","question":"compare these two guidelines","notes":"english comparison"}
+{"id":"route-017","intent":"general_knowledge","language":"ko","question":"RAG가 무엇인가요?","notes":"general knowledge tech"}
+{"id":"route-018","intent":"general_knowledge","language":"ko","question":"임베딩이란 무엇입니까?","notes":"general knowledge embedding"}
+{"id":"route-019","intent":"general_knowledge","language":"en","question":"what is a transformer model","notes":"english general knowledge"}
+{"id":"route-020","intent":"default","language":"ko","question":"이 부분을 좀 더 이해하기 쉽게 설명해줘","notes":"broad help request"}
+{"id":"route-021","intent":"default","language":"en","question":"help me understand this part","notes":"broad default intent"}
+{"id":"route-022","intent":"summarization","language":"ko","question":"업로드된 문서 전체를 정리해줘","notes":"whole-corpus summary style"}
+{"id":"route-023","intent":"factual_lookup","language":"ko","question":"총 몇 개입니까?","notes":"count lookup"}
+{"id":"route-024","intent":"smalltalk","language":"ko","question":"오케이 알겠어","notes":"short acknowledgement"}

@@ -1,0 +1,40 @@
+{"id":"route3-001","intent":"smalltalk","language":"ko","question":"안녕, 오늘은 그냥 가볍게 시작하자","notes":"greeting with extra filler"}
+{"id":"route3-002","intent":"smalltalk","language":"en","question":"okay, thanks, let's continue","notes":"acknowledgement plus transition"}
+{"id":"route3-003","intent":"smalltalk","language":"ko","question":"좋아 고마워 이제 다음으로 가자","notes":"gratitude plus continuation"}
+{"id":"route3-004","intent":"direct_extraction","language":"ko","question":"이 스크린샷에 보이는 문구를 그대로 적어줘","notes":"raw extraction paraphrase"}
+{"id":"route3-005","intent":"direct_extraction","language":"ko","question":"이미지 속 텍스트를 한 글자도 바꾸지 말고 보여줘","notes":"verbatim extraction"}
+{"id":"route3-006","intent":"direct_extraction","language":"en","question":"write out the exact words visible in this screenshot","notes":"english screenshot extraction"}
+{"id":"route3-007","intent":"factual_lookup","language":"ko","question":"제24장의 제목은 무엇입니까?","notes":"chapter title lookup"}
+{"id":"route3-008","intent":"factual_lookup","language":"ko","question":"이 문서에서 새 땅은 몇 장에 나옵니까?","notes":"chapter-number lookup"}
+{"id":"route3-009","intent":"factual_lookup","language":"en","question":"which chapter starts the eschatology section","notes":"structure fact lookup"}
+{"id":"route3-010","intent":"factual_lookup","language":"ko","question":"1931년에 정리된 기본교리는 몇 개였습니까?","notes":"history count lookup"}
+{"id":"route3-011","intent":"article_lookup","language":"ko","question":"제9조만 보여줘","notes":"simple article request"}
+{"id":"route3-012","intent":"article_lookup","language":"ko","question":"제6조 제2항의 문구를 확인해줘","notes":"article paragraph lookup"}
+{"id":"route3-013","intent":"article_lookup","language":"en","question":"show me section 14 only","notes":"english section lookup"}
+{"id":"route3-014","intent":"article_lookup","language":"ko","question":"제3조부터 제5조까지 원문으로 보여줘","notes":"article range retrieval"}
+{"id":"route3-015","intent":"summarization","language":"ko","question":"이 문서의 큰 흐름만 빠르게 정리해줘","notes":"overview summary paraphrase"}
+{"id":"route3-016","intent":"summarization","language":"ko","question":"핵심 구조를 목차 중심으로 한눈에 설명해줘","notes":"toc-based summarization"}
+{"id":"route3-017","intent":"summarization","language":"en","question":"give me the big-picture flow of this document","notes":"english flow summary"}
+{"id":"route3-018","intent":"summarization","language":"ko","question":"업로드한 문서들 전체를 묶어서 개괄해줘","notes":"whole-upload summarization"}
+{"id":"route3-019","intent":"comparison","language":"ko","question":"제4조와 제5조를 나란히 비교해줘","notes":"article comparison"}
+{"id":"route3-020","intent":"comparison","language":"ko","question":"이 규정과 저 규정의 다른 점이 뭐야?","notes":"broad regulation comparison"}
+{"id":"route3-021","intent":"comparison","language":"ko","question":"두 문서가 어떻게 다른지 핵심만 말해줘","notes":"document comparison paraphrase"}
+{"id":"route3-022","intent":"comparison","language":"en","question":"how do these two policies differ","notes":"english policy comparison"}
+{"id":"route3-023","intent":"general_knowledge","language":"ko","question":"벡터 검색은 일반 검색과 왜 다른가요?","notes":"tech explanation/comparison"}
+{"id":"route3-024","intent":"general_knowledge","language":"ko","question":"RAG랑 파인튜닝은 어떻게 다른가요?","notes":"tech comparison should remain general knowledge"}
+{"id":"route3-025","intent":"general_knowledge","language":"en","question":"what is the difference between reranking and embedding retrieval","notes":"english technical comparison"}
+{"id":"route3-026","intent":"general_knowledge","language":"ko","question":"트랜스포머 모델이 왜 중요한가요?","notes":"korean tech why-question"}
+{"id":"route3-027","intent":"default","language":"ko","question":"이 부분을 내 말로 다시 이해하고 싶어","notes":"broad local clarification"}
+{"id":"route3-028","intent":"default","language":"en","question":"can you make this part easier to follow","notes":"english local clarification"}
+{"id":"route3-029","intent":"default","language":"ko","question":"여기서 무엇을 중요하게 봐야 할지 감이 안 와","notes":"open-ended explanation"}
+{"id":"route3-030","intent":"default","language":"en","question":"help me get the point of this section","notes":"default explanation"}
+{"id":"route3-031","intent":"comparison","language":"ko","question":"공통점보다 차이점 위주로 두 규정을 설명해줘","notes":"comparison with explicit regulation wording"}
+{"id":"route3-032","intent":"summarization","language":"ko","question":"문서별로 나눠서 전체 내용을 짧게 요약해줘","notes":"file-by-file summary"}
+{"id":"route3-033","intent":"direct_extraction","language":"en","question":"show the exact text from the uploaded image without summarizing it","notes":"extraction with anti-summary phrasing"}
+{"id":"route3-034","intent":"general_knowledge","language":"en","question":"why is vector search useful in RAG","notes":"english general-knowledge why-question"}
+{"id":"route3-035","intent":"factual_lookup","language":"ko","question":"제20장의 이름이 뭐야?","notes":"casual factual lookup"}
+{"id":"route3-036","intent":"article_lookup","language":"ko","question":"제2조, 제3조, 제4조 순서대로 보여줘","notes":"multiple article lookup"}
+{"id":"route3-037","intent":"comparison","language":"ko","question":"제2조와 제4조가 서로 어떤 차이를 보이나요?","notes":"article comparison paraphrase"}
+{"id":"route3-038","intent":"general_knowledge","language":"ko","question":"임베딩과 리랭커의 역할 차이를 설명해줘","notes":"korean technical comparison should stay general knowledge"}
+{"id":"route3-039","intent":"summarization","language":"en","question":"outline the structure of the uploaded documents","notes":"multi-document structure summary"}
+{"id":"route3-040","intent":"default","language":"ko","question":"이 문장을 어떻게 받아들여야 할지 잘 모르겠어","notes":"local understanding request"}

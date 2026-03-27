@@ -23,7 +23,7 @@ from app.core.document_registry import (
     upsert_document,
 )
 from app.pipeline.parser import parse_pdf, parse_image
-from app.pipeline.chunker import chunk_documents
+from app.pipeline.chunker import chunk_documents_hierarchical
 from app.pipeline.enricher import enrich_chunks
 from app.core.vectorstore import (
     add_documents,
@@ -31,6 +31,7 @@ from app.core.vectorstore import (
     get_document_chunk_count,
     get_ingested_sources,
 )
+from app.core.parent_store import save_parents, clear_parents_for_doc
 
 logger = logging.getLogger("tilon.ingest")
 
@@ -120,23 +121,25 @@ def ingest_single_file(file_path: Path) -> Dict[str, Any]:
             "file": name,
         }
 
-    # Chunk, enrich, and store
-    chunks = chunk_documents(docs)
-    chunks = enrich_chunks(chunks)
+    # Chunk (hierarchical), enrich children, and store
+    parent_chunks, child_chunks = chunk_documents_hierarchical(docs)
+    child_chunks = enrich_chunks(child_chunks)
     doc_id = docs[0].metadata.get("doc_id") if docs else None
     source_type = docs[0].metadata.get("source_type") if docs else None
     if doc_id:
         replaced = delete_documents(doc_id=doc_id, source_type=source_type)
         if replaced:
             logger.info("Replaced %d existing chunks for doc_id=%s", replaced, doc_id)
-    add_documents(chunks)
-    registry_entry = upsert_document(file_path, docs, len(chunks))
+        clear_parents_for_doc(doc_id)
+    save_parents(parent_chunks)
+    add_documents(child_chunks)
+    registry_entry = upsert_document(file_path, docs, len(child_chunks))
 
-    logger.info("Ingested %s → %d chunks", name, len(chunks))
+    logger.info("Ingested %s → %d parents / %d children", name, len(parent_chunks), len(child_chunks))
 
     return {
-        "message": f"Successfully ingested {name}: {len(chunks)} chunks stored.",
-        "count": len(chunks),
+        "message": f"Successfully ingested {name}: {len(child_chunks)} child chunks stored ({len(parent_chunks)} parents).",
+        "count": len(child_chunks),
         "file": name,
         "doc_id": registry_entry.get("doc_id") if registry_entry else None,
         "source_type": registry_entry.get("source_type") if registry_entry else None,

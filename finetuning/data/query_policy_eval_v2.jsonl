@@ -1,0 +1,36 @@
+{"id":"route2-001","intent":"smalltalk","language":"ko","question":"안녕 오늘도 잘 부탁해","notes":"greeting with extra filler"}
+{"id":"route2-002","intent":"smalltalk","language":"en","question":"okay thanks, got it","notes":"english acknowledgement chain"}
+{"id":"route2-003","intent":"smalltalk","language":"ko","question":"오케이 그럼 진행해줘","notes":"short acknowledgement plus continuation"}
+{"id":"route2-004","intent":"direct_extraction","language":"ko","question":"이 이미지 안에 있는 글자 그대로 보여줘","notes":"raw extraction paraphrase"}
+{"id":"route2-005","intent":"direct_extraction","language":"en","question":"show me exactly what text appears in this screenshot","notes":"english extraction paraphrase"}
+{"id":"route2-006","intent":"direct_extraction","language":"ko","question":"OCR 결과만 출력해줘","notes":"ocr explicit"}
+{"id":"route2-007","intent":"factual_lookup","language":"ko","question":"제11장의 명칭은 무엇입니까?","notes":"chapter title fact lookup"}
+{"id":"route2-008","intent":"factual_lookup","language":"ko","question":"이 문서에서 안식일은 몇 장에 나옵니까?","notes":"chapter number lookup"}
+{"id":"route2-009","intent":"factual_lookup","language":"en","question":"how many fundamental beliefs are listed in this document","notes":"english count lookup"}
+{"id":"route2-010","intent":"factual_lookup","language":"ko","question":"1989년 한국어판 제목은 무엇이었나요?","notes":"history title lookup"}
+{"id":"route2-011","intent":"article_lookup","language":"ko","question":"제4조를 보여줘","notes":"short article lookup"}
+{"id":"route2-012","intent":"article_lookup","language":"ko","question":"제7조 제3항 내용을 알려줘","notes":"article + paragraph"}
+{"id":"route2-013","intent":"article_lookup","language":"en","question":"what does section 12 say","notes":"english section lookup"}
+{"id":"route2-014","intent":"article_lookup","language":"ko","question":"제15조의 문구를 그대로 알려줘","notes":"verbatim article lookup"}
+{"id":"route2-015","intent":"summarization","language":"ko","question":"이 파일 핵심만 짧게 정리해줘","notes":"summary paraphrase"}
+{"id":"route2-016","intent":"summarization","language":"ko","question":"문서 전체 흐름을 한 번에 설명해줘","notes":"overview summary"}
+{"id":"route2-017","intent":"summarization","language":"en","question":"summarize the whole document in a few bullets","notes":"english summary"}
+{"id":"route2-018","intent":"summarization","language":"ko","question":"목차 기준으로 구조를 개괄해줘","notes":"toc structure summary"}
+{"id":"route2-019","intent":"comparison","language":"ko","question":"제4조와 제5조는 어떻게 다릅니까?","notes":"article-to-article comparison"}
+{"id":"route2-020","intent":"comparison","language":"ko","question":"두 파일을 비교해서 차이점만 알려줘","notes":"multi-file comparison paraphrase"}
+{"id":"route2-021","intent":"comparison","language":"en","question":"compare article 3 and article 4","notes":"english article comparison"}
+{"id":"route2-022","intent":"comparison","language":"ko","question":"공통점과 차이점을 같이 설명해줘","notes":"generic comparison framing"}
+{"id":"route2-023","intent":"general_knowledge","language":"ko","question":"벡터 검색이 왜 중요한가요?","notes":"korean tech knowledge"}
+{"id":"route2-024","intent":"general_knowledge","language":"en","question":"explain retrieval augmented generation","notes":"english rag definition"}
+{"id":"route2-025","intent":"general_knowledge","language":"ko","question":"트랜스포머 모델이 뭔가요?","notes":"korean transformer question"}
+{"id":"route2-026","intent":"general_knowledge","language":"en","question":"what is an embedding model","notes":"english embedding knowledge"}
+{"id":"route2-027","intent":"default","language":"ko","question":"이 부분을 쉽게 풀어서 말해줘","notes":"broad clarification request"}
+{"id":"route2-028","intent":"default","language":"en","question":"can you walk me through this part more simply","notes":"english broad clarification"}
+{"id":"route2-029","intent":"default","language":"ko","question":"이 내용이 왜 중요한지 감을 잡고 싶어","notes":"open-ended local explanation"}
+{"id":"route2-030","intent":"default","language":"en","question":"help me make sense of this section","notes":"default explanation request"}
+{"id":"route2-031","intent":"summarization","language":"ko","question":"업로드한 문서들을 전체적으로 요약해줘","notes":"whole upload summary"}
+{"id":"route2-032","intent":"comparison","language":"ko","question":"업로드한 두 문서를 나란히 비교해줘","notes":"upload comparison"}
+{"id":"route2-033","intent":"factual_lookup","language":"ko","question":"제20장의 제목이 뭐야?","notes":"casual factual lookup"}
+{"id":"route2-034","intent":"article_lookup","language":"ko","question":"제2조부터 제4조까지 보여줘","notes":"article range lookup"}
+{"id":"route2-035","intent":"general_knowledge","language":"ko","question":"임베딩하고 reranker 차이가 뭐야?","notes":"general tech comparison should still be general knowledge"}
+{"id":"route2-036","intent":"comparison","language":"ko","question":"이 규정과 저 규정의 다른 점이 뭐야?","notes":"broad comparison"}

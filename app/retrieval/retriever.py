@@ -25,6 +25,7 @@ from app.core.vectorstore import (
     similarity_search_with_scores,
     get_documents_by_source,
 )
+from app.core.parent_store import get_parent
 from app.retrieval.keyword_index import search_keyword_index, tokenize_text
 from app.retrieval.reranker import rerank
 
@@ -126,6 +127,37 @@ def retrieve(
         )
     elif docs:
         logger.info("Skipping reranker for %d retrieved document(s)", len(docs))
+
+    # ── Parent-child expansion ──────────────────────────────────────────
+    # Replace each child chunk with its full-context parent when available.
+    # Multiple children sharing the same parent are collapsed to one entry.
+    expanded: List[Document] = []
+    seen_parent_ids: set = set()
+    expanded_count = 0
+    for doc in docs:
+        parent_id = doc.metadata.get("parent_id")
+        if parent_id:
+            if parent_id in seen_parent_ids:
+                continue  # deduplicate: same parent already added
+            parent_text = get_parent(parent_id)
+            if parent_text:
+                seen_parent_ids.add(parent_id)
+                expanded_count += 1
+                expanded.append(
+                    Document(
+                        page_content=parent_text,
+                        metadata={**doc.metadata, "expanded_to_parent": True},
+                    )
+                )
+                continue
+        expanded.append(doc)
+    docs = expanded
+    if expanded_count:
+        logger.info(
+            "Parent expansion: %d child(ren) → %d parent context(s) (%d total)",
+            expanded_count, expanded_count, len(docs),
+        )
+    # ────────────────────────────────────────────────────────────────────
 
     strong_keyword_hit = _has_strong_keyword_hit(query, keyword_results, doc_id_filter=doc_id_filter)
     confidence = _estimate_confidence(vector_results, merged, strong_keyword_hit)
@@ -273,7 +305,7 @@ def format_context(docs: List[Document], max_chars_per_chunk: int = 900) -> str:
         # Use breadcrumb if available (from semantic chunker)
         section = d.metadata.get("section_breadcrumb", "") or d.metadata.get("section_title", "")
 
-        header = f"[Doc: {source} | Page: {page} | Section: {section} | Lang: {lang}]"
+        header = f"[{idx}] [Doc: {source} | Page: {page} | Section: {section} | Lang: {lang}]"
 
         # Strip enrichment header from content to avoid duplication
         content = _header_re.sub('', d.page_content).strip()

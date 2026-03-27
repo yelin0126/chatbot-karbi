@@ -23,6 +23,7 @@ from app.config import (
     AVAILABLE_MODELS,
     LLM_BACKEND,
     LLM_MAX_TOKENS,
+    LLM_SUPPRESS_FOREIGN_SCRIPTS,
     LLM_TEMPERATURE,
     LLM_TIMEOUT,
     LOCAL_LLM_ADAPTER_PATH,
@@ -50,6 +51,29 @@ _CJK_BAD_TOKEN_IDS: Optional[list] = None
 
 def _dependency_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+def _from_pretrained_with_cache_fallback(loader, model_name: str, **kwargs):
+    """
+    Prefer local-only loading when configured, but recover gracefully if the
+    local HF cache is incomplete and network access is actually available.
+    """
+    try:
+        return loader(model_name, **kwargs)
+    except Exception as exc:
+        local_only = kwargs.get("local_files_only", False)
+        if not local_only:
+            raise
+        if not isinstance(exc, (OSError, ValueError)):
+            raise
+        logger.warning(
+            "Local HF cache miss for '%s' with local_files_only=True; retrying with network access enabled (%s)",
+            model_name,
+            exc,
+        )
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["local_files_only"] = False
+        return loader(model_name, **retry_kwargs)
 
 
 def get_default_model_name() -> str:
@@ -167,6 +191,10 @@ def _build_local_generation_config(model, tokenizer, temperature: Optional[float
     # Suppress foreign-script tokens that must never appear in Korean output:
     # CJK (Chinese/Japanese), Cyrillic (Russian etc.), and Thai characters.
     # Builds the list once and caches it for all subsequent calls.
+    # Can be disabled via LLM_SUPPRESS_FOREIGN_SCRIPTS=false in .env for testing.
+    if not LLM_SUPPRESS_FOREIGN_SCRIPTS:
+        return generation_config
+
     if _CJK_BAD_TOKEN_IDS is None:
         bad_ids = []
         for token_id in range(tokenizer.vocab_size):
@@ -236,7 +264,8 @@ def _load_local_runtime() -> dict[str, Any]:
         model_kwargs["device_map"] = "auto"
 
     base_model_name = _resolve_local_base_model(adapter_path)
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = _from_pretrained_with_cache_fallback(
+        AutoTokenizer.from_pretrained,
         base_model_name,
         use_fast=True,
         local_files_only=LOCAL_LLM_LOCAL_FILES_ONLY,
@@ -244,7 +273,11 @@ def _load_local_runtime() -> dict[str, Any]:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, **model_kwargs)
+    base_model = _from_pretrained_with_cache_fallback(
+        AutoModelForCausalLM.from_pretrained,
+        base_model_name,
+        **model_kwargs,
+    )
     base_model.eval()
     model = PeftModel.from_pretrained(base_model, str(adapter_path))
     model.eval()

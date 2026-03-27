@@ -28,8 +28,16 @@ import pytesseract
 from pdf2image import convert_from_path
 from langchain_core.documents import Document
 
+try:
+    import pdfplumber as _pdfplumber  # optional — column-aware + table extraction
+    _PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    _pdfplumber = None  # type: ignore
+    _PDFPLUMBER_AVAILABLE = False
+
 from app.config import (
     ENABLE_OCR,
+    PADDLE_OCR_ENABLED,
     MARKER_OUTPUT_DIR,
     OLLAMA_BASE_URL,
     VLM_EXTRACTION_ENABLED,
@@ -37,6 +45,7 @@ from app.config import (
     VLM_HYBRID_PDF_ENABLED,
     VLM_EXTRACTION_MODEL,
 )
+from app.core.paddle_ocr import ocr_page_image as _paddle_ocr_page
 
 logger = logging.getLogger("tilon.parser")
 
@@ -111,6 +120,7 @@ def _estimate_confidence(method: str, real_chars: int, gibberish_ratio: float) -
         "marker_pdf": 0.95,
         "text": 0.92,
         "vlm": 0.78,
+        "paddle_ocr": 0.82,
         "ocr": 0.72,
         "ocr_image": 0.72,
     }.get(method, 0.7)
@@ -976,6 +986,24 @@ def _parse_pdf_page(
             if ocr_candidate is not None:
                 candidates.append(ocr_candidate)
 
+    # PaddleOCR v5 — higher-accuracy Korean OCR with PyKoSpacing post-processing.
+    # Scores 0.82 vs Tesseract's 0.72, so _select_best_page_candidate prefers it.
+    if rendered_page is not None and ENABLE_OCR and PADDLE_OCR_ENABLED:
+        paddle_text = _paddle_ocr_page(rendered_page)
+        if paddle_text and len(paddle_text.strip()) >= 10:
+            paddle_chain = fallback_chain + ["paddleocr"]
+            paddle_candidate = _build_page_candidate_document(
+                text=paddle_text,
+                artifact_meta=artifact_meta,
+                page_num=page_num,
+                method="paddle_ocr",
+                page_analysis=page_analysis,
+                routing_reason=routing_reason,
+                fallback_chain=">".join(paddle_chain),
+            )
+            if paddle_candidate is not None:
+                candidates.append(paddle_candidate)
+
     text_candidate = next(
         (candidate for candidate in candidates if candidate.metadata.get("extraction_method") == "text"),
         None,
@@ -1042,6 +1070,234 @@ def _parse_pdf_page(
 # ═══════════════════════════════════════════════════════════════════════
 # Main Parser — per-page routing with document-level fallback
 # ═══════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Method 6: pdfplumber — column-aware + table extraction
+# ═══════════════════════════════════════════════════════════════════════
+
+_PDFPLUMBER_COLUMN_MIN_WORDS = 6   # minimum words in each column to declare 2-col layout
+_PDFPLUMBER_COLUMN_MARGIN_PX = 15  # pixels of dead-zone around page midpoint
+
+
+def _pdfplumber_page_text(page: Any) -> str:
+    """
+    Extract text from one pdfplumber page with automatic column detection.
+
+    If the page has roughly equal word distributions on left and right halves,
+    we treat it as 2-column and extract each half separately so reading order
+    is preserved (left col first, right col after).
+    """
+    words = page.extract_words() or []
+    if not words:
+        return ""
+
+    mid = page.width / 2
+    left_words = [w for w in words if w["x1"] <= mid - _PDFPLUMBER_COLUMN_MARGIN_PX]
+    right_words = [w for w in words if w["x0"] >= mid + _PDFPLUMBER_COLUMN_MARGIN_PX]
+
+    is_two_column = (
+        len(left_words) >= _PDFPLUMBER_COLUMN_MIN_WORDS
+        and len(right_words) >= _PDFPLUMBER_COLUMN_MIN_WORDS
+        and len(right_words) >= len(left_words) * 0.25  # right col has at least 25% of left
+    )
+
+    if is_two_column:
+        left_col = page.crop((0, 0, mid, page.height))
+        right_col = page.crop((mid, 0, page.width, page.height))
+        left_text = (left_col.extract_text() or "").strip()
+        right_text = (right_col.extract_text() or "").strip()
+        combined = "\n\n".join(p for p in [left_text, right_text] if p)
+        return combined
+
+    return (page.extract_text() or "").strip()
+
+
+def _table_to_text(table: List[List[Any]]) -> str:
+    """Convert a pdfplumber table (list of rows) to readable pipe-delimited text."""
+    if not table:
+        return ""
+    lines = []
+    for row in table:
+        cells = [str(c).strip() if c is not None else "" for c in row]
+        lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def _extract_pdfplumber(pdf_path: str, artifact_meta: dict) -> List[Document]:
+    """
+    Extract Documents from PDF using pdfplumber with column-aware text ordering
+    and structured table extraction.
+
+    Returns one Document per page.  Table items on a page are appended as
+    extra Documents with chunk_type='table'.
+    """
+    if not _PDFPLUMBER_AVAILABLE:
+        return []
+
+    docs: List[Document] = []
+    try:
+        with _pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                page_num = i + 1
+
+                # Column-aware text
+                text = _pdfplumber_page_text(page)
+                if text:
+                    normalized = _normalize_extracted_text(text)
+                    real_chars = len(re.sub(r"\s+", "", normalized))
+                    gib_ratio = round(_gibberish_ratio(normalized), 3)
+                    language = detect_language(normalized[:300])
+                    docs.append(Document(
+                        page_content=normalized,
+                        metadata={
+                            **artifact_meta,
+                            "page": page_num,
+                            "chunk_type": "page",
+                            "extraction_method": "pdfplumber",
+                            "page_kind": "digital",
+                            "extractors_used": "pdfplumber",
+                            "text_yield_chars": len(normalized),
+                            "real_char_count": real_chars,
+                            "gibberish_ratio": gib_ratio,
+                            "extraction_confidence": _estimate_confidence("text", real_chars, gib_ratio),
+                            "quality_flags": _quality_flags(real_chars, gib_ratio, language),
+                            "language": language,
+                            "routing_reason": "pdfplumber_column_aware",
+                            "fallback_chain": "pdfplumber",
+                            "section_title": "",
+                            "reading_order_mode": "pdfplumber_column",
+                        },
+                    ))
+
+                # Tables as separate Documents
+                tables = page.extract_tables() or []
+                for t_idx, table in enumerate(tables):
+                    table_text = _table_to_text(table).strip()
+                    if len(table_text) < 10:
+                        continue
+                    real_chars_t = len(re.sub(r"\s+", "", table_text))
+                    gib_ratio_t = round(_gibberish_ratio(table_text), 3)
+                    language_t = detect_language(table_text[:300])
+                    docs.append(Document(
+                        page_content=table_text,
+                        metadata={
+                            **artifact_meta,
+                            "page": page_num,
+                            "chunk_type": "table",
+                            "extraction_method": "pdfplumber_table",
+                            "page_kind": "digital",
+                            "extractors_used": "pdfplumber",
+                            "text_yield_chars": len(table_text),
+                            "real_char_count": real_chars_t,
+                            "gibberish_ratio": gib_ratio_t,
+                            "extraction_confidence": _estimate_confidence("text", real_chars_t, gib_ratio_t),
+                            "quality_flags": _quality_flags(real_chars_t, gib_ratio_t, language_t),
+                            "language": language_t,
+                            "routing_reason": "pdfplumber_table",
+                            "fallback_chain": "pdfplumber",
+                            "section_title": f"표 (page {page_num}, table {t_idx + 1})",
+                            "table_index_on_page": t_idx,
+                            "reading_order_mode": "pdfplumber_table",
+                        },
+                    ))
+    except Exception as exc:
+        logger.warning("pdfplumber extraction failed for %s: %s", pdf_path, exc)
+
+    return docs
+
+
+def _should_prefer_pdfplumber(pymupdf_doc: Optional[Document], pdfplumber_doc: Optional[Document]) -> bool:
+    """
+    Return True if pdfplumber produced meaningfully better text for a page.
+
+    Criteria:
+    - pdfplumber detected a 2-column layout → always prefer (reading order fix)
+    - pdfplumber has noticeably more real chars AND less gibberish
+    - PyMuPDF is garbled and pdfplumber is clean
+    """
+    if pdfplumber_doc is None:
+        return False
+    if pymupdf_doc is None:
+        return True
+
+    py_chars = int(pymupdf_doc.metadata.get("real_char_count") or 0)
+    py_gib = float(pymupdf_doc.metadata.get("gibberish_ratio") or 1.0)
+    pl_chars = int(pdfplumber_doc.metadata.get("real_char_count") or 0)
+    pl_gib = float(pdfplumber_doc.metadata.get("gibberish_ratio") or 1.0)
+
+    py_flags = set((pymupdf_doc.metadata.get("quality_flags") or "").split(",")) - {""}
+
+    # Column-aware extraction — always prefer if pdfplumber is reasonably clean
+    # and has at least 70% of PyMuPDF char count (small gaps expected due to
+    # whitespace normalisation differences between extractors)
+    if (pdfplumber_doc.metadata.get("reading_order_mode") == "pdfplumber_column"
+            and pl_gib <= _GIBBERISH_THRESHOLD
+            and pl_chars >= max(50, py_chars * 0.70)):
+        return True
+
+    # PyMuPDF is garbled — pdfplumber is always preferred when clean
+    if "garbled_text" in py_flags and pl_gib <= _GIBBERISH_THRESHOLD:
+        return True
+
+    # pdfplumber has 25%+ more real chars with equal or better gibberish
+    if pl_chars >= py_chars * 1.25 and pl_gib <= py_gib + 0.05:
+        return True
+
+    return False
+
+
+def _apply_pdfplumber_enhancements(
+    page_docs: List[Document],
+    pdf_path: str,
+    artifact_meta: dict,
+) -> List[Document]:
+    """
+    Post-process page_docs: replace any page whose text is worse than what
+    pdfplumber can produce, and append standalone table Documents.
+    """
+    if not _PDFPLUMBER_AVAILABLE:
+        return page_docs
+
+    pl_docs = _extract_pdfplumber(pdf_path, artifact_meta)
+    if not pl_docs:
+        return page_docs
+
+    # Separate text pages from table chunks
+    pl_pages: dict[int, Document] = {}
+    pl_tables: List[Document] = []
+    for doc in pl_docs:
+        if doc.metadata.get("chunk_type") == "table":
+            pl_tables.append(doc)
+        else:
+            pnum = doc.metadata.get("page", 0)
+            pl_pages[pnum] = doc
+
+    # Possibly replace PyMuPDF pages with pdfplumber versions
+    enhanced: List[Document] = []
+    replaced = 0
+    for doc in page_docs:
+        pnum = doc.metadata.get("page", 0)
+        pl_doc = pl_pages.get(pnum)
+        if _should_prefer_pdfplumber(doc, pl_doc):
+            enhanced.append(pl_doc)
+            replaced += 1
+        else:
+            enhanced.append(doc)
+
+    # Add table Documents (deduplicated by content length — avoid tiny tables)
+    added_tables = 0
+    for table_doc in pl_tables:
+        enhanced.append(table_doc)
+        added_tables += 1
+
+    if replaced or added_tables:
+        logger.info(
+            "  → pdfplumber: replaced %d page(s), added %d table chunk(s)",
+            replaced, added_tables,
+        )
+
+    return enhanced
 
 
 def parse_pdf(pdf_path: str) -> List[Document]:
@@ -1141,7 +1397,7 @@ def parse_pdf(pdf_path: str) -> List[Document]:
             "  → Using routed per-page extraction (avg %.0f chars/page)",
             avg_chars_per_page,
         )
-        return page_docs
+        return _apply_pdfplumber_enhancements(page_docs, pdf_path, artifact_meta)
 
     if marker_text:
         cleaned = _clean_marker_text(marker_text)
