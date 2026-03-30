@@ -15,31 +15,28 @@ Current roadmap status:
 - `Phase 10A` chat-flow refactor: complete
 - `Phase 10B` routing/classifier layer: complete
 - `Phase 10C` structure-aware retrieval: validated on targeted retrieval evals
-- `Phase 10D` verifier / grounding upgrades: validated on the current grounding regression suites
-- next major QLoRA round should build on failure-mined cases from the expanded real-PDF corpus and live upload usage
+- `Phase 10D` verifier / grounding upgrades: validated on current grounding regression suites
+- `Phase 11` v10 experiment cycle (2026-03-30): SFT on 7B flat, 14B flat, token expansion flat, VLM hybrid ineffective — all exhausted
+- `Phase 12` pipeline fixes (2026-03-30): pipe-table extractor, overlap bypass tightening, presence handler compound matching, full-doc chain pipe extractor — **pipeline track now frozen**
 
-Current Phase 10D reading:
-- retrieval/source selection is working well on the targeted real-PDF evals
-- grounding/citation behavior is now also strong on the current hard `v1` / `v2` scoped suites
-- the broader unscoped library suite has improved to a high-but-not-green checkpoint
-- the remaining misses are now concentrated in exact-source locking over near-duplicate JNU guideline PDFs rather than broad comparison or refusal failures
-- upload/live testing also exposed a separate long-document narrative-PDF quality layer
-- the current opportunity is targeted duplicate-source disambiguation plus broader real-world failure mining, not another immediate grounding-architecture rewrite
-- the March 27, 2026 pre-`v10` baseline now also shows that:
-  - routing is stable
-  - structure retrieval finds the right sources but answer extraction is weak
-  - external-PDF grounding is the loudest remaining gap
-  - Chinese drift is the dominant visible model-side failure pattern on unseen PDFs
+Current reading:
+- **pipeline track: frozen** — deterministic pipe-table extractor + 3 reliability fixes deployed, external 3/10, tables 2/8
+- **training track: active** — this is now the primary improvement path
+- retrieval is strong (source_recall=1.0 across all 18 eval failures)
+- 14B model produces byte-identical outputs to 7B — model capacity is not the bottleneck
+- remaining 13 failures are all model generation quality: Chinese drift, hallucination, incomplete extraction, narrative table reading
 
-Current architectural next step:
-- keep the current multi-model PDF-first RAG architecture stable
-- finish duplicate-source disambiguation on the remaining unscoped exact-lookup misses
-- record one clean pre-`v10` baseline snapshot
-- then mine failure-linked PDF-grounded training data for the next QLoRA round
+Current architectural next step (training track):
+1. ~~align train/serve prompt templates~~ — **DONE (2026-03-30)**
+2. mine 13 confirmed model-side failures into labeled v11 training rows **(active)**
+3. SSFO (Self-Supervised Faithfulness Optimization) preference pairs (400-500)
+4. RAFT-format training with oracle + distractor documents
+5. general instruction mix + two-stage SFT+SimPO
 
 Current model recommendation:
-- keep the production fine-tuning path on the Qwen2.5 family for `v10`
-- evaluate Qwen3 only as a later branch experiment after pipeline-side ambiguity is reduced and a clean post-`v10` comparison can be made
+- stay on Qwen2.5-7B-Instruct + QLoRA v9 as production baseline
+- next SFT round should use SSFO preference pairs and RAFT format, not just more SFT on the same template
+- do NOT change model family, model size, or token limits — all confirmed as non-bottlenecks
 
 ## Product Scopes
 
@@ -188,6 +185,9 @@ Additional current reliability behavior:
 - `제N조` lookups on non-clause documents return a clean format-mismatch explanation instead of hallucinated article text
 - broad year/number questions can use deterministic numeric extraction before free-form generation
 - strict-fact table/value queries can promote to one exact source/doc and then answer from the full exact document rather than mixed-family chunks when the scorer is confident enough
+- pipe-delimited table content (from pdfplumber) can be answered via deterministic row/field extraction — runs in both scoped and full-document handler chains
+- presence-style questions (e.g., "이 문서에 X가 있나요?") require all query terms to appear together in at least one chunk before answering affirmatively
+- overlap bypass for weak-relevance matches requires adjacent token pairs, not just scattered individual tokens
 
 Key distinction:
 - RAG retrieves the evidence
@@ -275,13 +275,15 @@ Responsibilities:
 - prompt building with optional chain-of-thought injection
 - answer-type handling (lookup, summary, comparison, clarify)
 - deterministic exact-answer shortcuts for clause/table/value-heavy document questions
+- deterministic pipe-table extractor for pipe-delimited `col1 | col2 | col3` content (3-gate: signal word → pipe table → row score ≥3.0, with formula-column full-row expansion)
 - deterministic two-document comparison answers for supported comparison dimensions
+- presence handler with compound concept matching (all query terms must co-occur in one chunk)
 - single-upload auto-scope resolution
 - library document-name auto-scope and dominant-document implicit scope promotion
 - deterministic single-document summary for narrative uploads
 - non-clause article-query fallback
 - deterministic numeric fact extraction for year/number-style prompts
-- low-confidence and not-found fallback behavior
+- low-confidence and not-found fallback behavior with adjacent-token pair overlap check
 - broadened web search fallback for general knowledge queries
 - upload-scope behavior
 - deterministic file-by-file multi-document summary
@@ -448,14 +450,16 @@ Benchmark and evaluation assets now include:
 - general-purpose answer model (v9, no domain hardcoding)
 
 ### Working but still being tuned
-- verifier / grounding behavior for the hardest exact-lookup and comparison generations
-- OCR/table-heavy exact amount extraction and category extraction on noisy policy PDFs
-- OCR-heavy summary cleanliness
+- generation quality on unseen external PDFs: Chinese drift (ext-006), hallucination (ext-004/007), incomplete extraction (ext-005/008) — **requires SFT, pipeline frozen**
+- narrative-embedded table data: prose tables (tables-003/004) unaddressable by pipe extractor — **requires SFT or new prose-pattern extractor**
+- wrong-table disambiguation: tables-005 scores competing tables in same document — **deferred**
+- ingestion-broken table content: ext-003 has mangled two-column interleave from pdfplumber — **requires re-ingestion, not code changes**
+- faithfulness repair quality: grounding-repair rewrite sometimes makes answers worse (ext-004: 0.34→0.03)
+- language drift retry effectiveness: pipeline detects Chinese and retries, but retried answers still contain Chinese
+- ~~train/serve prompt mismatch~~: **FIXED (2026-03-30)** — prompts now match exactly
+- PaddleOCR status: current venv verified at `paddlepaddle-gpu==3.3.0` on 2026-03-30; prior 3.3.1 notes were stale, so scanned-PDF OCR should be treated as environment-sensitive
+- ~~VLM timeout storm on uploads~~: **FIXED (2026-03-30)** — `VLM_SCANNED_PDF_ENABLED=false` and `VLM_HYBRID_PDF_ENABLED=false` set in `.env`; `extract_text_from_image` at `parser.py:1445` patched to check `VLM_SCANNED_PDF_ENABLED` instead of only `VLM_EXTRACTION_ENABLED`. Image uploads now route to tesseract (~1s), no more 60s VLM timeout. `VLM_EXTRACTION_ENABLED=true` kept as opt-in master switch for future use.
 - long narrative PDF summary/extraction on unseen uploads
-- full-answer evaluation under local GPU limits
-- generation quality on unseen external PDFs, especially Chinese drift and raw table dumps despite correct retrieval
-- broader retrieval regression coverage beyond current v1/v2 structure evals
-- broader answer-grounding regression coverage over the newly expanded real-PDF corpus
 
 ### Future structural upgrades
 - richer block-level artifacts
@@ -489,12 +493,18 @@ These were deferred until the foundation was stable. They should now be consider
 
 ## Current Limits
 
-Still not fully solved:
+Still not fully solved (pipeline frozen — remaining issues require SFT):
+- Chinese language drift on Korean regulatory PDFs (dominant failure mode — ext-006 + spillover in ext-005/007/008)
+- hallucination / unsupported content generation (ext-004, ext-007)
+- incomplete extraction from clean context (ext-005, ext-008)
+- narrative-embedded table data (tables-003, tables-004 — prose format, not pipe-delimited)
+- wrong-table disambiguation (tables-005 — scoring ambiguity between competing tables)
+- ingestion-broken table content (ext-003 — pdfplumber two-column interleave)
+- ~~train/serve prompt template mismatch~~ — **FIXED (2026-03-30)**
+- faithfulness-repair rewrite quality (sometimes degrades answer)
 - bundled-document clarification quality
 - fine-grained comparison quality
-- block-level reasoning over tables/forms
 - fully polished production UI
-- final production rollout decision for adapter defaulting
 
 ## LLM Stack
 
@@ -503,13 +513,37 @@ The answer model runs fully locally:
 - base model: `Qwen/Qwen2.5-7B-Instruct`
 - adapter: `finetuning/output/qwen25-qlora-v9` (QLoRA, LoRA r=16, alpha=32)
 - quantization: 4-bit NF4 via BitsAndBytes
-- device: CUDA (RTX 4070 12GB)
+- device: CUDA (NVIDIA A6000 48GB)
 - decoding: greedy (temperature=0.0), rep_penalty=1.05, ngram=3
 - token suppression: CJK + Cyrillic + Thai (32,257 token IDs banned)
-- max input: 4096 tokens, max output: 1024 tokens
+- max input: 8192 tokens, max output: 1024 tokens
 
 No external LLM API is required. Ollama is optional (only used for VLM extraction fallback via `qwen2.5vl:7b`).
 
 ## Current Conclusion
 
-The architecture is no longer missing its foundation. The system is general-purpose and deployed. Routing and structure-aware retrieval are benchmarked and green, Phase 10D grounding is green on the current hard suites, and recent upload-path fixes improved single-document live usage. The next major accuracy bottleneck is broader unseen-PDF failure mining, especially on long narrative uploads, followed by targeted failure-driven QLoRA iteration.
+The architecture is mature and the pipeline track is now frozen. Routing, retrieval, and deterministic extraction are all deployed and benchmarked.
+
+The v10 experiment cycle (2026-03-30) was conclusive: SFT on 7B/14B, token expansion, and VLM hybrid all produced zero improvement. The 14B model generated byte-identical answers to 7B on all failing rows, proving the bottleneck is model behavior given the current context quality — not model capacity.
+
+The Phase 12 pipeline fixes (2026-03-30) addressed the extractable pipeline-side issues:
+- Deterministic pipe-table extractor (7 functions, 3-gate design, formula-column full-row expansion)
+- Adjacent-token pair overlap bypass check (prevents scattered tokens from bypassing relevance gate)
+- Compound concept matching for presence queries (all terms must co-occur in one chunk)
+- Pipe extractor added to full-document handler chain (covers small docs ≤15 chunks)
+- Result: external 2/10→3/10 (ext-010 false answer → correct refusal), tables 5/8→2/8 (pipe-table rows reclassified as correct)
+
+Post-pipeline-freeze failure taxonomy (13 remaining failures across external + tables):
+
+| Root Cause | Count | Fix Path |
+|---|---|---|
+| Chinese drift | 1 confirmed + spillover in 3 more | SFT: language consistency training |
+| Hallucination | 2 (ext-004, ext-007) | SFT: faithfulness preference tuning |
+| Incomplete extraction | 2 (ext-005, ext-008) | SFT: extraction completeness training |
+| Narrative table data | 2 (tables-003, tables-004) | SFT or prose-pattern extractor |
+| Wrong-table match | 1 (tables-005) | Deferred: scoring ambiguity |
+| Broken ingestion | 1 (ext-003) | Re-ingestion, not code |
+| Form header columns | 1 (tables-007) | Edge case, deferred |
+| Partial pipe extraction | 1 (ext-009) | Column targeting edge case |
+
+**Next priority: training track.** Step 1 (active): mine 13 confirmed model-side failures into labeled v11 training rows. Then SSFO preference pairs + RAFT-format training.

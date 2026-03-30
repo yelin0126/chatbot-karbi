@@ -16,6 +16,24 @@ logger = logging.getLogger("tilon.embeddings")
 _embedding_model = None
 
 
+def _resolve_embedding_device() -> str:
+    requested = EMBEDDING_DEVICE
+    if requested != "cuda":
+        return requested
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+
+    logger.warning(
+        "Embedding device was configured as 'cuda' but no CUDA GPU is available; falling back to CPU."
+    )
+    return "cpu"
+
+
 def get_embeddings():
     global _embedding_model
 
@@ -30,11 +48,11 @@ def get_embeddings():
         logger.info(
             "Loading embedding model '%s' on device '%s'...",
             EMBEDDING_MODEL,
-            EMBEDDING_DEVICE,
+            _resolve_embedding_device(),
         )
         _embedding_model = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
-            model_kwargs={"device": EMBEDDING_DEVICE},
+            model_kwargs={"device": _resolve_embedding_device()},
             encode_kwargs={"normalize_embeddings": True},
         )
         logger.info("Embedding model loaded successfully.")

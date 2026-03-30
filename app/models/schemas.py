@@ -7,7 +7,7 @@ IMPROVEMENTS over original:
 - Added model validation
 """
 
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -32,6 +32,69 @@ class ChatRequest(BaseModel):
     active_source_type: Optional[str] = None
     active_sources: List[str] = Field(default_factory=list)
     active_doc_ids: List[str] = Field(default_factory=list)
+    chat_id: Optional[str] = None
+
+
+class GeneratedAssetInfo(BaseModel):
+    asset_id: str
+    chat_id: str
+    job_id: Optional[str] = None
+    asset_type: Literal["image", "video", "analysis"]
+    status: Literal["ready", "failed"] = "ready"
+    model_name: str
+    prompt: str
+    grounded_brief: Optional[str] = None
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    file_path: str
+    file_url: Optional[str] = None
+    thumbnail_path: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    mime_type: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class MediaJobInfo(BaseModel):
+    job_id: str
+    chat_id: str
+    job_type: Literal["image_generation", "video_generation"]
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    prompt: str
+    grounded_brief: Optional[str] = None
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    model_name: str
+    asset_id: Optional[str] = None
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    chat_id: Optional[str] = None
+    active_source: Optional[str] = None
+    active_doc_id: Optional[str] = None
+    active_source_type: Optional[str] = None
+    active_sources: List[str] = Field(default_factory=list)
+    active_doc_ids: List[str] = Field(default_factory=list)
+    width: Optional[int] = None
+    height: Optional[int] = None
+    num_inference_steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
+
+
+class GenerateVideoRequest(BaseModel):
+    prompt: str
+    chat_id: Optional[str] = None
+    active_source: Optional[str] = None
+    active_doc_id: Optional[str] = None
+    active_source_type: Optional[str] = None
+    active_sources: List[str] = Field(default_factory=list)
+    active_doc_ids: List[str] = Field(default_factory=list)
+    width: Optional[int] = None
+    height: Optional[int] = None
+    num_frames: Optional[int] = None
+    fps: Optional[int] = None
 
 
 class SourceInfo(BaseModel):
@@ -56,6 +119,9 @@ class ChatResponse(BaseModel):
     active_source_type: Optional[str] = None
     active_sources: List[str] = Field(default_factory=list)
     active_doc_ids: List[str] = Field(default_factory=list)
+    chat_id: Optional[str] = None
+    media: List[GeneratedAssetInfo] = Field(default_factory=list)
+    job: Optional[MediaJobInfo] = None
     done: bool = True
 
 

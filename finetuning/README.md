@@ -9,7 +9,7 @@ Related docs:
 
 ## Current Status
 
-This workstream is active and deployed.
+This workstream is active and deployed. The **training track is now the primary improvement path** after the pipeline track was frozen (2026-03-30).
 
 What is working now:
 - local QLoRA training for Qwen2.5 7B (4-bit NF4)
@@ -24,15 +24,15 @@ What is working now:
 - the hard real-PDF grounding suite now has a stable green checkpoint (`verifier_grounding_eval_v2 = 10/10`)
 - an unscoped library grounding suite now exists for broader corpus-wide verification (`verifier_grounding_eval_unscoped_v1`)
 - the latest unscoped library checkpoint on March 27, 2026 is `22/24`, with `avg_source_recall = 0.917`, `avg_answer_point_recall = 0.875`, and `correct_not_found_rate = 1.0`
-- pre-`v10` expansion slices now exist for external-style PDFs and table/list/form-heavy PDFs
-- the March 27, 2026 pre-`v10` baseline also shows:
-  - structure retrieval `v1`: `6/11`
-  - structure retrieval `v2`: `6/15`
-  - external grounding: `2/10`
-  - table grounding: `5/8`
-  - dominant remaining model symptom on unseen PDFs: Chinese drift / raw table dumping
+- Phase 12 pipeline fixes deployed (2026-03-30): pipe-table extractor, overlap bypass, presence handler, full-doc chain
+- post-pipeline eval: external 3/10, tables 2/8 — pipeline track now frozen
 
 Current deployed adapter: `qwen25-qlora-v9`
+
+Post-pipeline-freeze status:
+- **13 remaining eval failures are all model generation quality** (source_recall=1.0 everywhere)
+- Chinese drift, hallucination, incomplete extraction, narrative table reading
+- ~~prompt misalignment between `train.py` and `prompting.py`~~: **FIXED (2026-03-30)** — prompts now match exactly
 
 Adapter history:
 
@@ -48,7 +48,7 @@ Adapter history:
 v9 training details:
 - data: `qlora_train_v9_combined.jsonl` (v5 90 + 45 new general samples)
 - topics: contracts, policies, tech docs, manuals, reports, greetings
-- loss: 1.097 → 0.377, 3 epochs, ~4m38s on RTX 4070 12GB
+- loss: 1.097 → 0.377, 3 epochs, ~4m38s (trained on RTX 4070 12GB; current GPU is A6000 48GB)
 - zero domain-specific content
 
 Best measured eval result (v6 on strict Korean set):
@@ -94,37 +94,54 @@ Why this order matters:
 - synthetic augmentation should only expand coverage that real docs already partially cover
 
 Current recommendation:
-- do not start a broad synthetic expansion round first
+- pipeline track is frozen — all extractable pipeline fixes are deployed
+- **training track is now primary**
+- ~~**Step 1 (prerequisite):** align train/serve prompt templates~~ — **DONE (2026-03-30)**. **Current active step: Step 2 — mine 13 model-side failures into labeled training rows.**
+- **Step 2:** mine 13 confirmed model-side failures into labeled v11 training rows (exclude ingestion-broken ext-003, label by failure type)
+- **Step 3:** SSFO (Self-Supervised Faithfulness Optimization) — generate chosen (with context) and rejected (without context) responses from same model, 400-500 preference pairs
+- **Step 4:** RAFT-format training — oracle document + k distractor documents per example, 80/20 split, chain-of-thought with inline citations
+- **Step 5:** general instruction mix + two-stage SFT+SimPO (DPO variant, saves ~4-5GB VRAM)
 - use the now-stable routing / retrieval / grounding suites as regression guards
-- mine new failures from the expanded real-PDF corpus, live usage, and real uploaded files
-- keep fixing pipeline-side issues first when failures are really scoping, retrieval, grounding, or long-document evidence-selection problems
-- build the next adapter round from those real grounded misses
-- right now the highest-value misses are still PDF-grounded exact-source selection and a small number of benchmark-linked explanation/summary residues, not the already-green scoped grounding suite
-- because recent benchmark gains came without changing the adapter, the next adapter round should remain failure-mined and PDF-first rather than broad or speculative
-- before building `v10`, run one clean full-suite baseline snapshot so post-training regressions can be compared against a single checkpoint rather than scattered runs
-- the baseline snapshot is now available, so the next step is to mine `v10` directly from those failure buckets rather than continuing broad benchmark expansion first
+- do NOT pursue: Qwen3, 14B, VLM hybrid on digital PDFs — all confirmed non-productive (2026-03-30)
+- `v10` adapters saved as artifacts but not deployed; v9 remains the production adapter
 
 Next adapter guidance:
-- v9 is the current baseline — general-purpose SFT, no domain content
-- v10 candidate: expand with failure-mined PDF-grounded exact-lookup, refusal, section-understanding, comparison, and live-upload answer-shaping examples from the post-Phase 10 evals and the growing real-PDF corpus
-- v10+ candidate: DPO preference tuning on (prompt, chosen, rejected) triples from live benchmark failures
-- model recommendation: keep `v10` on `Qwen/Qwen2.5-7B-Instruct`
+- v9 is the current deployed baseline — general-purpose SFT, no domain content
+- v10 experiment cycle completed 2026-03-30 — all approaches flat:
+  - Tier A (168 rows): no improvement over v9 baseline
+  - Tier A+B (170 rows): slight regression
+  - 14B: byte-identical outputs to 7B on all failing rows
+  - Token 4096→8192: trimming eliminated, pass counts unchanged
+  - VLM hybrid: never fired on digital PDFs
+- Phase 12 pipeline fixes completed 2026-03-30 — pipeline track frozen:
+  - Pipe-table extractor: deterministic row/field extraction for pipe-delimited content
+  - Overlap bypass: adjacent-token pair check prevents scattered-token false matches
+  - Presence handler: compound concept matching (all terms must co-occur in one chunk)
+  - Full-doc chain: pipe extractor added for small docs ≤15 chunks
+  - Result: external 3/10 (up from 2/10), tables 2/8 (correctly scored)
+- **v11 plan: prompt alignment → SSFO preference pairs → RAFT-format training → SFT+SimPO**
+- model: stay on `Qwen/Qwen2.5-7B-Instruct`
   - reason 1: the current production stack, prompts, and eval history are already anchored to Qwen2.5
-  - reason 2: the biggest current blocker is still pipeline-side duplicate-source ambiguity, not a proven model ceiling
-  - reason 3: changing to Qwen3 at the same time as failure-mined data creation would make attribution harder
+  - reason 2: 14B produced identical outputs — model size is not the bottleneck
+  - reason 3: changing to Qwen3 at the same time as training changes would make attribution harder
 - when to test Qwen3:
-  - after the pre-`v10` baseline is recorded
-  - after `v10` has been trained and compared against that baseline
+  - only after v11 training track is evaluated
   - as a separate branch experiment with the same dataset and evaluation suite
 
 Current model-side conclusion:
-- the project does not yet have evidence that QLoRA inefficiency is the main remaining blocker
-- the move from low unscoped grounding performance to `22/24` came mainly from RAG/scoping/extraction/deterministic-answer fixes
-- the remaining misses still have pipeline characteristics, especially duplicate-source ambiguity over near-identical guideline PDFs
+- the v10 experiment cycle (2026-03-30) exhausted model-size, SFT volume, token expansion, and VLM hybrid approaches — all flat
+- 14B produces byte-identical outputs to 7B on failing rows, proving model capacity is not the bottleneck
+- the move from low unscoped grounding to `22/24` came mainly from RAG/scoping/extraction/deterministic-answer fixes
+- Phase 12 pipeline fixes added 1 new pass (ext-010 correct refusal) and correctly reclassified table scores
+- the remaining 13 failures are model generation quality: Chinese drift, hallucination, incomplete extraction, narrative table reading
+- **next: align prompts, then SSFO + RAFT-format training on confirmed model-side failures**
 
 Practical recommendation:
-- if the goal is the fastest reliable next improvement, stay on Qwen2.5 for `v10`
-- if the goal later becomes higher upside after the pipeline is cleaner, evaluate Qwen3 with the exact same failure-mined dataset and compare it against the Qwen2.5 `v10` checkpoint
+- ~~Step 1: align train/serve prompt templates~~ — **DONE (2026-03-30)**
+- Step 2: mine 13 failures into labeled training rows by failure type
+- Step 3-5: SSFO → RAFT → SFT+SimPO two-stage training
+- only consider model-family changes after v11 training track is evaluated
+- do NOT pursue: Qwen3, 14B, broad SFT expansion, VLM hybrid on digital PDFs — all confirmed flat
 
 
 ## Training Data Format
@@ -176,12 +193,15 @@ python finetuning/train.py \
   --fp16
 ```
 
-Recommended for 12GB-class GPUs:
-- stop `uvicorn`
-- stop `ollama serve`
-- keep `batch_size=1`
-- use `grad_accum=8`
-- use `fp16`
+Recommended for A6000 48GB:
+- `batch_size=4` (up to 8)
+- `grad_accum=4`
+- `bf16`
+- `max_seq_len=2048` (up to 4096)
+
+For 12GB-class GPUs (legacy):
+- stop `uvicorn` and `ollama serve` first
+- `batch_size=1`, `grad_accum=16`, `fp16`
 - use `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 
 ## Dry Run
@@ -299,14 +319,17 @@ These were postponed until the supervised fine-tuning path was proven. They shou
 
 ## Recommended Next Step
 
-Do not start a new broad training round immediately.
+Pipeline track is frozen. Training track is now primary.
 
-Recommended next move:
-1. keep `v9` as the deployed general-purpose baseline
-2. use the new routing and structure-retrieval evals to mine high-signal failures
-3. keep verifier grounding evals (`v1`, `v2`) green as regression guards
-4. mine new unseen-PDF and live-chat failures for targeted SFT / preference data
-5. build `v10` from failure-driven PDF-grounded data, not broad expansion
+Recommended next steps:
+1. ~~**align train/serve prompt templates**~~ — **DONE (2026-03-30)**: `train.py`'s `DEFAULT_SYSTEM_PROMPT` now matches `prompting.py`'s `COMPACT_SYSTEM_PROMPT` exactly.
+2. mine 13 confirmed model-side failures (exclude ingestion-broken ext-003) into labeled v11 training rows by failure type: `chinese_drift`, `hallucination`, `incomplete_extraction`, `narrative_table_reading`
+3. generate 400-500 SSFO preference pairs (chosen with context, rejected without)
+4. assemble RAFT-format training data (oracle + distractor documents, 80/20 split)
+5. two-stage training: SFT on combined data, then SimPO preference tuning
+6. evaluate against all existing regression suites
+
+PaddleOCR status: current venv verified at `paddlepaddle-gpu==3.3.0` on 2026-03-30; earlier 3.3.1 notes were stale, so scanned-PDF OCR should be treated as environment-sensitive until re-verified.
 
 Pre-`v10` baseline helper:
 

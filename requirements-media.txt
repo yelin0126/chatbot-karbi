@@ -1,0 +1,13 @@
+# Optional multimodal runtime dependencies for image/video generation.
+# Install these in the serving environment when enabling the media subsystem.
+#
+# Example:
+#   pip install -r requirements.txt -r requirements-media.txt
+
+torch>=2.1.0
+transformers>=4.51.0
+accelerate>=0.30.0
+diffusers>=0.34.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+imageio>=2.36.0

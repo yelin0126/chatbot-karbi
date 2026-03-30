@@ -1442,7 +1442,7 @@ def extract_text_from_image(image_path: str) -> tuple:
     OCR an image file. Uses VLM if available, else tesseract.
     Returns (text, method) tuple so caller knows which method succeeded.
     """
-    if VLM_EXTRACTION_ENABLED:
+    if VLM_EXTRACTION_ENABLED and VLM_SCANNED_PDF_ENABLED:
         try:
             image = Image.open(image_path)
             img_b64 = _image_to_base64(image)

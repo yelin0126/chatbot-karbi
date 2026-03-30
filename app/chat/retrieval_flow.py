@@ -202,9 +202,21 @@ def has_strong_query_overlap(user_message: str, docs, min_hits: int = 2) -> bool
         return False
 
     doc_text = " ".join(_structure_snippet(doc, max_chars=500) for doc in docs[:4])
-    hits = sum(1 for token in query_tokens if token in doc_text)
-    if hits >= min_hits:
-        return True
+    hit_set = {t for t in query_tokens if t in doc_text}
+
+    if len(hit_set) >= min_hits:
+        # 3+ scattered token hits is strong enough on its own.
+        if len(hit_set) >= 3:
+            return True
+        # For exactly min_hits (2), require at least one *adjacent* pair of
+        # query tokens to both be present.  This prevents false bypasses where
+        # individual tokens (e.g. "수수료" and "중앙구매") scatter across
+        # unrelated sections while the actual compound concept
+        # (e.g. "취소 수수료") is absent from the document.
+        for i in range(len(query_tokens) - 1):
+            if query_tokens[i] in hit_set and query_tokens[i + 1] in hit_set:
+                return True
+        return False
 
     return any(phrase in doc_text for phrase in _query_focus_phrases(user_message))
 

@@ -27,6 +27,7 @@ from app.chat.deterministic import (
     try_scoped_change_summary as _try_scoped_change_summary,
     try_scoped_clause_answer as _try_scoped_clause_answer,
     try_scoped_count_answer as _try_scoped_count_answer,
+    try_pipe_table_lookup as _try_pipe_table_lookup,
 )
 from app.chat.policy import (
     is_direct_extraction_query as _is_direct_extraction_query,
@@ -1131,6 +1132,23 @@ def _run_retrieval_stage(
                     active_source_type=active_source_type,
                 )
 
+            pipe_table_result = _try_pipe_table_lookup(user_message, state.docs)
+            if pipe_table_result:
+                pipe_answer, pipe_docs = pipe_table_result
+                logger.info(
+                    "Answered pipe-table lookup directly from '%s'%s",
+                    active_source or "scoped document",
+                    f" ({active_doc_id})" if active_doc_id else "",
+                )
+                return state.response(
+                    _deterministic_grounded_response(pipe_answer, pipe_docs),
+                    mode="document_qa",
+                    sources=extract_sources(pipe_docs),
+                    active_source=active_source,
+                    active_doc_id=active_doc_id,
+                    active_source_type=active_source_type,
+                )
+
             clause_docs = state.docs
             if state.query_policy.strict_fact:
                 clause_docs = _select_strict_fact_docs(user_message, state.docs)
@@ -1183,6 +1201,23 @@ def _run_retrieval_stage(
                         _deterministic_grounded_response(numeric_answer, state.docs[:3]),
                         mode="document_qa",
                         sources=extract_sources(state.docs[:3]),
+                        active_source=active_source,
+                        active_doc_id=active_doc_id,
+                        active_source_type=active_source_type,
+                    )
+
+                pipe_table_result = _try_pipe_table_lookup(user_message, state.docs)
+                if pipe_table_result:
+                    pipe_answer, pipe_docs = pipe_table_result
+                    logger.info(
+                        "Answered pipe-table lookup (full-doc) directly from '%s'%s",
+                        active_source or "scoped document",
+                        f" ({active_doc_id})" if active_doc_id else "",
+                    )
+                    return state.response(
+                        _deterministic_grounded_response(pipe_answer, pipe_docs),
+                        mode="document_qa",
+                        sources=extract_sources(pipe_docs),
                         active_source=active_source,
                         active_doc_id=active_doc_id,
                         active_source_type=active_source_type,

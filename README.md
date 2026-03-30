@@ -72,37 +72,65 @@ Latest Phase 10D checkpoint:
 - `verifier_grounding_eval_v1`: improved to `6/8`
 - `verifier_grounding_eval_v2`: `10/10` on the current hard real-PDF set
 - `verifier_grounding_eval_unscoped_v1` (latest checkpoint on March 27, 2026): `22/24`, `avg_source_recall = 0.917`, `avg_answer_point_recall = 0.875`, `correct_not_found_rate = 1.0`
-- pre-`v10` baseline snapshot on March 27, 2026:
+- corrected pre-`v10` baseline snapshot (March 30, 2026 — after eval bug fix and full experiment cycle):
   - routing `v3`: `40/40`
-  - structure retrieval `v1`: `6/11` (`source_recall = 1.0`, `point_recall = 0.444`)
-  - structure retrieval `v2`: `6/15` (`source_recall = 1.0`, `point_recall = 0.185`)
+  - structure retrieval `v1`: `1/11` (`source_recall = 1.0`, `point_recall = 0.273`) — was reported `6/11` before eval bug fix
+  - structure retrieval `v2`: `0/15` (`source_recall = 1.0`, `point_recall = 0.178`) — was reported `6/15` before eval bug fix
   - scoped grounding `v1`: `5/8`
-  - external grounding: `2/10`
-  - table grounding: `5/8`
-- pre-`v10` coverage expansion is now staged with:
-  - `verifier_grounding_eval_external_v1.jsonl` for non-primary-library PDF types
-  - `verifier_grounding_eval_tables_v1.jsonl` for table/list/form-heavy exact lookups
-- current conclusion: the biggest gains came from RAG/scoping/extraction/deterministic-answer fixes, not a new adapter round; the last remaining unscoped misses are now much more model-facing, while the external-PDF slice shows strong Chinese-drift and answer-extraction weakness on unseen PDFs
+  - external grounding `v1`: `3/10` (`avg_apr = 0.358`) — was `2/10` before pipeline fixes
+  - table grounding `v1`: `2/8` (`avg_apr = 0.323`) — was `5/8` before pipe-table extractor reworked handler routing
+  - unscoped `v1`: `22/24`
+  - **combined grounding (tables + external): 5/18** (up from 4/18 baseline)
 
-## Next Roadmap
+## Known Bottlenecks (as of 2026-03-30, updated post-pipeline-freeze)
 
-Immediate pre-`v10` priorities:
-- freeze the March 27, 2026 pre-`v10` baseline snapshot as the comparison point
-- mine `qlora_train_v10` from the remaining `011` / `014` unscoped failures plus the external-PDF and table-grounding failures
-- focus especially on Chinese-drift suppression and exact amount extraction from noisy policy/table context
-- keep any further pipeline tweaks smaller than the training-data changes so post-`v10` comparison stays interpretable
+These are the confirmed root causes blocking eval improvement, ordered by impact:
 
-Next QLoRA workstream:
-- assemble `qlora_train_v10` from benchmark-linked and real PDF-grounded failures
-- focus on exact lookup, refusal/not-found, section understanding, comparison, and OCR/table-heavy answer shaping
-- keep the existing `question/context/answer` schema
-- compare post-`v10` behavior against the single pre-`v10` baseline snapshot rather than scattered historical runs
+1. **Language drift to Chinese** (3+ rows): Qwen2.5-7B generates simplified Chinese characters (시스테姆, 研究设备, 장备) when processing Korean regulatory text. Observed on both 7B and 14B. Training-addressable.
 
-Broader roadmap after `v10`:
-- add more unseen external PDFs to the grounding suite
-- add more multi-file and long-narrative PDF rows
-- collect live failure logs and separate pipeline failures from true model-side failures
-- only then consider a larger model-family migration or preference-tuning round
+2. **Hallucination / proper-noun corruption** (4+ rows): Model invents content (국민신명고 instead of 국민신문고) or fabricates functions not in source text. NLI faithfulness hard threshold (0.15) is too low to catch plausible-sounding hallucinations. Training-addressable.
+
+3. **Incomplete extraction from valid context** (4+ rows): Model receives clear Korean definitions/lists but outputs partial or garbled answers. Chunks contain the answer points but the model fails to extract them. Training-addressable.
+
+4. **Narrative-embedded table data** (2+ rows): pdfplumber extracts some tables as prose (`학부생: 시간당 50,000원 이하`) instead of pipe-delimited format. The pipe-table deterministic extractor can't fire on these. Needs a separate narrative-pattern extractor or training.
+
+5. ~~**Train/serve prompt misalignment**~~: **FIXED (2026-03-30)** — `train.py`'s `DEFAULT_SYSTEM_PROMPT` now matches `prompting.py`'s `COMPACT_SYSTEM_PROMPT` exactly. User message format aligned to `[Retrieved document context]`/`[User message]`.
+
+6. **PaddleOCR status** (2026-03-30): scanned-PDF OCR pipeline was unblocked in prior testing, but the current venv is verified at `paddlepaddle-gpu==3.3.0` (not 3.3.1). Treat OCR stability as environment-sensitive.
+
+7. ~~**VLM timeout on uploads**~~: **FIXED (2026-03-30)** — `VLM_HYBRID_PDF_ENABLED` and `VLM_SCANNED_PDF_ENABLED` both set to `false`. `extract_text_from_image` patched to respect `VLM_SCANNED_PDF_ENABLED` so image uploads skip VLM and go to tesseract. Upload ingest: digital ~8s, image ~1s, no more timeout storms.
+
+## Pipeline Track (frozen as of 2026-03-30)
+
+Completed pipeline fixes:
+
+1. **Pipe-table deterministic extractor** (done): 7 new functions in `app/chat/deterministic.py` (`_chunk_has_pipe_table`, `_parse_pipe_rows`, `_resolve_header_row`, `_target_column_from_header`, `_row_key_score`, `try_pipe_table_lookup`). Wired into both scoped AND full-document handler chains in `handlers.py`. Handles formula-type columns (returns full row for 산출식/공식).
+
+2. **Overlap bypass tightening** (done): `has_strong_query_overlap` in `retrieval_flow.py` now requires adjacent token pairs when exactly 2 tokens match. Prevents scattered individual tokens from bypassing the relevance gate.
+
+3. **Compound concept matching in presence handler** (done): `try_scoped_presence_answer` now requires ALL selected terms to appear in at least one chunk. Fixed external-010 false non-refusal ("취소 수수료" treated as compound concept, not scattered words).
+
+**Pipeline track result**: tables 2/8, external 3/10 (5/18 combined, up from 4/18). Remaining 13 failures are model-side — pipeline improvements exhausted for easy wins.
+
+## Training Track (active — next phase)
+
+~~**Step 0 — Prompt alignment**~~: **DONE (2026-03-30)** — prompts aligned. See finetuning/train.py.
+
+**Step 1 — Mine 7 high-signal eval failures** (ext-004,005,006,007,008; tables-003,004) into labeled training rows (chinese_drift, hallucination, incomplete_extraction, narrative_table_reading) via live server capture.
+
+**Step 2 — SSFO preference pairs**: 400-500 self-supervised chosen/rejected pairs from the student model (with-context vs without-context). Research shows this produces 85%+ of max faithfulness gains on Qwen2.5-7B-Instruct.
+
+**Step 3 — RAFT-format training**: Reformat existing rows with oracle + 3 distractor documents. 15-20% as no-oracle (refusal) examples.
+
+**Step 4 — General instruction mix**: 20-25% general Korean instruction data to prevent catastrophic forgetting.
+
+**Step 5 — Two-stage training**: SFT (aligned prompt + mined rows + RAFT + general mix), then SimPO on SSFO preference pairs.
+
+What to NOT do next (confirmed by experiments):
+- Do NOT retrain on Qwen2.5-14B (byte-identical outputs to 7B — model size is not the bottleneck)
+- Do NOT further expand token limits (8192 is sufficient — trimming was not the cause)
+- Do NOT pursue VLM hybrid for current table failures (PDFs are digital, VLM never triggers)
+- Do NOT use SFT for pipe-delimited table lookup — deterministic extraction handles that
 
 ## Current Active Adapter
 
@@ -118,10 +146,17 @@ Training summary:
 Previous adapter `v8` was retired because ~78% of its training data was domain-specific (church PDFs), causing biased answer behavior on general documents.
 
 Current answer-model interpretation:
-- `qwen25-qlora-v9` remains the deployed baseline
-- recent benchmark improvement came mainly from PDF-grounded pipeline work, not from changing the adapter
-- the next adapter round should therefore stay PDF-first and failure-mined, teaching the model to use retrieved PDF context better rather than trying to compensate for weak retrieval or duplicate-source ambiguity
-- recommendation: stay on the Qwen2.5 family for the next adapter round (`v10`) so the new training data is evaluated against a stable, already-integrated baseline; test Qwen3 only as a separate controlled branch after the pre-`v10` baseline and first PDF-grounded failure-mined round are complete
+- `qwen25-qlora-v9` remains the deployed baseline (general-purpose, RISE-PDF biased — 82/135 rows are RISE-like)
+- v10 experiment cycle completed (2026-03-30), all results conclusive:
+  - v10 Tier A (168 rows, 7B): **flat** — no improvement over v9
+  - v10 Tier A+B (170 rows, 7B): **slight regression** (scoped v1 5→4/8)
+  - Qwen2.5-14B on v10 Tier A: **flat** — byte-for-byte identical answers to 7B on structure/table failures
+  - Token limit expansion 4096→8192: **flat** — trimming eliminated but scores unchanged
+  - VLM hybrid experiment: **no effect** — all target PDFs are digital (text layer present), VLM never triggers
+- **True v9 baseline** (after eval bug fix): structure v1 1/11, structure v2 0/15 (was 6/11, 6/15 — unevaluated rows counted as passes)
+- **Root cause**: 33-row failure audit + 14B confirmation proves bottleneck is model behavior on pipe-delimited table context and language drift, not model capacity or context extraction quality
+- PaddleOCR status: current venv verified at `paddlepaddle-gpu==3.3.0` on 2026-03-30; prior notes claiming 3.3.1 were stale
+- **Current priority**: mine 7 model-side failures into labeled v11 training rows (Step 1), then SSFO + RAFT training for v11 adapter. Pipeline track frozen.
 
 LLM config (`.env`):
 - `LLM_BACKEND=local_hf`
@@ -130,6 +165,7 @@ LLM config (`.env`):
 - `LLM_TEMPERATURE=0.0`
 - `VECTOR_TOP_K=10`
 - `RERANKER_ENABLED=true` / `RERANKER_DEVICE=cuda` / `RERANKER_USE_FP16=true`
+- `VLM_EXTRACTION_ENABLED=true` / `VLM_SCANNED_PDF_ENABLED=false` / `VLM_HYBRID_PDF_ENABLED=false` (VLM preserved as opt-in; all per-type flags disabled — digital→pymupdf, scanned→PaddleOCR, hybrid→pymupdf, image→tesseract)
 
 ## Quick Start
 
@@ -275,13 +311,13 @@ Chat-level improvements on top of retrieval:
 
 Recent retrieval evaluation:
 - query routing eval `v3`: live routing reached `40/40`
-- structure retrieval eval `v1`: `6/11`, with `source_recall = 1.0` but weak answer extraction
-- structure retrieval eval `v2`: `6/15`, with `source_recall = 1.0` but weak answer extraction
+- structure retrieval eval `v1`: `1/11`, with `source_recall = 1.0` but weak answer extraction (corrected — was 6/11 before eval bug fix)
+- structure retrieval eval `v2`: `0/15`, with `source_recall = 1.0` but weak answer extraction (corrected — was 6/15 before eval bug fix)
 - verifier grounding eval `v1`: improved to `6/8`
 - verifier grounding eval `v2`: `10/10` on newly ingested real PDFs
 - verifier grounding eval `unscoped_v1` (March 27, 2026 checkpoint): `22/24`, `avg_source_recall = 0.917`, `avg_answer_point_recall = 0.875`, `correct_not_found_rate = 1.0`
-- verifier grounding eval `external_v1`: `2/10`, with Chinese drift as the dominant failure mode
-- verifier grounding eval `tables_v1`: `5/8`
+- verifier grounding eval `external_v1`: `3/10` (post-Phase-12 pipeline fixes), with hallucination and incomplete extraction as the dominant remaining failure modes
+- verifier grounding eval `tables_v1`: `2/8` (post-Phase-12 pipeline fixes), with narrative-embedded table data and edge-case column detection as the dominant remaining failure modes
 - the earlier grounding bottleneck on OCR/table/amendment-style PDFs has been substantially reduced by deterministic exact-answer, amendment-summary, unscoped auto-scope, dominant-document promotion, and deterministic comparison handling
 
 Current grounding interpretation:
@@ -324,7 +360,7 @@ Current behavior:
 
 Current limitation:
 - OCR-heavy or noisy image-derived uploads can still produce rough summaries
-- very long narrative PDFs can still pressure the local 4096-token generation window on some summary/extraction tasks
+- very long narrative PDFs can still pressure the local 8192-token generation window on some summary/extraction tasks
 - this is now more of a long-document evidence selection issue than a basic upload-flow issue
 
 ## QLoRA Status

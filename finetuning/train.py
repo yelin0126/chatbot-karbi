@@ -27,8 +27,16 @@ from typing import Dict, Iterable, List
 
 DEFAULT_SYSTEM_PROMPT = (
     "너는 한국어로 답하는 AI 챗봇이다. "
-    "짧은 질문에는 짧고 자연스럽게 답한다. "
-    "문서 질문은 문서 근거로만 답하고, 근거가 없으면 모른다고 말한다."
+    "짧은 질문에는 짧고 자연스럽게 답한다.\n\n"
+    "답변 규칙:\n"
+    "1. CRITICAL: Respond in the SAME language the user is using. "
+    "Korean→Korean, English→English. NEVER respond in Chinese (中文).\n"
+    "2. 문서 문맥이 제공된 경우 그것을 근거로 답하고, 인라인 출처 번호 [1], [2] 등을 표기한다.\n"
+    "3. 문서 문맥이 질문과 무관하면 '해당 내용은 제공된 문서에서 확인되지 않습니다'라고 답한다. 없는 내용을 지어내지 마라.\n"
+    "4. 문서 문맥이 없으면 일반 지식으로 자연스럽게 답한다.\n"
+    "5. 핵심 답변을 먼저 말한다.\n"
+    "6. 이미지에서 추출된 텍스트가 제공되면 해당 텍스트를 기반으로 답한다.\n"
+    "7. 문서 근거로 답하는 문장이나 bullet에는 반드시 [1], [2] 같은 인라인 출처 번호를 넣어라."
 )
 
 LANG_RULE = (
@@ -158,30 +166,15 @@ def _validate_rows(rows: Iterable[Dict], data_path: Path) -> List[Dict]:
 
 
 def build_document_system_message(system_prompt: str) -> str:
-    return (
-        f"{system_prompt}\n\n"
-        "답변 규칙:\n"
-        f"1. {LANG_RULE}\n"
-        "2. 제공된 문서 문맥만 근거로 답한다.\n"
-        "3. 문서에 없는 내용은 추측하지 않는다.\n"
-        '4. 문맥이 부족하면 "해당 내용은 제공된 문서에서 확인되지 않습니다."라고 답한다.\n'
-        "5. 핵심 답변을 먼저 말한다.\n"
-        "6. 가능하면 페이지와 문서를 근거로 설명한다.\n"
-        "7. 이미지에서 추출된 텍스트가 제공되면 해당 텍스트를 기반으로 답한다."
-    ).strip()
+    return system_prompt.strip()
 
 
 def build_document_user_message(user_message: str, context: str) -> str:
-    return f"""[검색된 문서]
-{context if context else "검색된 관련 문서 없음"}
-
-[사용자 질문]
-{user_message}
-
-[답변 형식]
-- 핵심 답변:
-- 근거 요약:
-- 참고 문서:""".strip()
+    parts: list[str] = []
+    if context:
+        parts.append(f"[Retrieved document context]\n{context}")
+    parts.append(f"[User message]\n{user_message}")
+    return "\n\n".join(parts)
 
 
 def build_document_prompt(system_prompt: str, user_message: str, context: str) -> str:
@@ -447,7 +440,7 @@ def main() -> None:
         "seed": args.seed,
     }
 
-    # Keep the optimizer footprint low on 12GB-class cards when running QLoRA.
+    # Use paged optimizer to reduce memory spikes during QLoRA training.
     if use_4bit and _dependency_available("bitsandbytes"):
         training_kwargs["optim"] = "paged_adamw_8bit"
 

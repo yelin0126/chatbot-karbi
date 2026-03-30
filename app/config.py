@@ -24,9 +24,16 @@ DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", DATA_DIR / "uploads"))
 TEMP_DIR = Path(os.getenv("TEMP_DIR", DATA_DIR / "temp"))
+GENERATED_DIR = Path(os.getenv("GENERATED_DIR", DATA_DIR / "generated"))
 CHROMA_DIR = Path(os.getenv("CHROMA_DIR", BASE_DIR / "chroma_db"))
 DOCUMENT_REGISTRY_PATH = Path(
     os.getenv("DOCUMENT_REGISTRY_PATH", DATA_DIR / "document_registry.json")
+)
+MEDIA_REGISTRY_PATH = Path(
+    os.getenv("MEDIA_REGISTRY_PATH", GENERATED_DIR / "media_registry.json")
+)
+MEDIA_JOBS_PATH = Path(
+    os.getenv("MEDIA_JOBS_PATH", GENERATED_DIR / "media_jobs.json")
 )
 MARKER_OUTPUT_DIR = BASE_DIR / "marker_output"
 
@@ -48,7 +55,7 @@ LOCAL_LLM_LOCAL_FILES_ONLY = os.getenv("LOCAL_LLM_LOCAL_FILES_ONLY", "true").low
 LOCAL_LLM_LOAD_IN_4BIT = os.getenv("LOCAL_LLM_LOAD_IN_4BIT", "true").lower() == "true"
 LOCAL_LLM_MAX_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_MAX_INPUT_TOKENS", "4096"))
 LOCAL_LLM_OOM_RETRY_INPUT_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_INPUT_TOKENS", "3072"))
-LOCAL_LLM_OOM_RETRY_MAX_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_MAX_TOKENS", "512"))
+LOCAL_LLM_OOM_RETRY_MAX_TOKENS = int(os.getenv("LOCAL_LLM_OOM_RETRY_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "180"))
@@ -134,6 +141,36 @@ VLM_EXTRACTION_ENABLED = os.getenv("VLM_EXTRACTION_ENABLED", "true").lower() == 
 VLM_SCANNED_PDF_ENABLED = os.getenv("VLM_SCANNED_PDF_ENABLED", "true").lower() == "true"
 VLM_HYBRID_PDF_ENABLED = os.getenv("VLM_HYBRID_PDF_ENABLED", "false").lower() == "true"
 VLM_EXTRACTION_MODEL = os.getenv("VLM_EXTRACTION_MODEL", "qwen2.5vl:7b")
+
+# ── Media Generation / Understanding (V1) ────────────────────────────
+MEDIA_ENABLED = os.getenv("MEDIA_ENABLED", "true").lower() == "true"
+MEDIA_OUTPUT_DIR = Path(os.getenv("MEDIA_OUTPUT_DIR", GENERATED_DIR))
+MEDIA_QUEUE_POLL_INTERVAL_MS = int(os.getenv("MEDIA_QUEUE_POLL_INTERVAL_MS", "750"))
+MEDIA_MAX_CONCURRENT_JOBS = int(os.getenv("MEDIA_MAX_CONCURRENT_JOBS", "1"))
+MEDIA_JOB_TIMEOUT_SECONDS = int(os.getenv("MEDIA_JOB_TIMEOUT_SECONDS", "900"))
+MEDIA_THUMBNAIL_ENABLED = os.getenv("MEDIA_THUMBNAIL_ENABLED", "true").lower() == "true"
+MEDIA_BRIEF_USE_LLM = os.getenv("MEDIA_BRIEF_USE_LLM", "true").lower() == "true"
+MEDIA_BRIEF_MAX_CHARS = int(os.getenv("MEDIA_BRIEF_MAX_CHARS", "900"))
+MEDIA_IMAGE_UNDERSTANDING_MODEL = os.getenv(
+    "MEDIA_IMAGE_UNDERSTANDING_MODEL",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
+)
+MEDIA_IMAGE_GENERATION_MODEL = os.getenv(
+    "MEDIA_IMAGE_GENERATION_MODEL",
+    "black-forest-labs/FLUX.1-schnell",
+)
+MEDIA_VIDEO_GENERATION_MODEL = os.getenv(
+    "MEDIA_VIDEO_GENERATION_MODEL",
+    "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+)
+MEDIA_IMAGE_MAX_STEPS = int(os.getenv("MEDIA_IMAGE_MAX_STEPS", "4"))
+MEDIA_IMAGE_GUIDANCE_SCALE = float(os.getenv("MEDIA_IMAGE_GUIDANCE_SCALE", "0.0"))
+MEDIA_IMAGE_WIDTH = int(os.getenv("MEDIA_IMAGE_WIDTH", "1024"))
+MEDIA_IMAGE_HEIGHT = int(os.getenv("MEDIA_IMAGE_HEIGHT", "1024"))
+MEDIA_VIDEO_NUM_FRAMES = int(os.getenv("MEDIA_VIDEO_NUM_FRAMES", "49"))
+MEDIA_VIDEO_FPS = int(os.getenv("MEDIA_VIDEO_FPS", "8"))
+MEDIA_VIDEO_WIDTH = int(os.getenv("MEDIA_VIDEO_WIDTH", "832"))
+MEDIA_VIDEO_HEIGHT = int(os.getenv("MEDIA_VIDEO_HEIGHT", "480"))
 
 # ── Logging ───────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

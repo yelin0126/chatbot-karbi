@@ -18,6 +18,10 @@ STRICT_FACT_STOP_TOKENS = {
     "is", "are", "the",
 }
 
+_KOREAN_SUFFIX_RE = re.compile(
+    r"(?:에게서|한테서|이라고|라고|이라면|이면|입니다|입니까|인가요|인가|까지|으로서|로서|에서는|에게도|에서도|에는|에서|에게|한테|으로|로|은|는|이|가|을|를|의|에)$"
+)
+
 _BILINGUAL_QUERY_ALIASES = {
     "safety": ["안전"],
     "requirement": ["요건", "조건", "기준"],
@@ -737,13 +741,9 @@ def normalize_fact_query_tokens(text: str) -> List[str]:
     for token in tokenize_text(text):
         candidates = {token}
         if len(token) >= 3 and re.match(r"[가-힣]+$", token):
-            candidates.add(
-                re.sub(
-                    r"[은는이가의를을와과도만로으로에에서께]|입니다|입니까|인가요|인가|인가\??$",
-                    "",
-                    token,
-                )
-            )
+            stripped = _strip_korean_query_suffix(token)
+            if stripped and stripped != token:
+                candidates.add(stripped)
         for candidate in candidates:
             candidate = candidate.strip()
             if len(candidate) < 2 or candidate in STRICT_FACT_STOP_TOKENS:
@@ -2267,7 +2267,14 @@ def try_scoped_presence_answer(user_message: str, docs) -> Optional[str]:
     if not terms:
         return None
 
-    if _presence_match_count(docs, terms) > 0:
+    # Require ALL selected terms in at least one chunk so that compound
+    # concepts (e.g. "취소 수수료") are treated as a unit.  Scattered
+    # individual matches (e.g. "수수료" in one section but "취소" nowhere)
+    # no longer bypass the refusal.
+    if any(
+        all(t in strip_enrichment_header(d.page_content).lower() for t in terms)
+        for d in docs
+    ):
         return None
 
     item_label = _presence_item_label(user_message)
@@ -2660,3 +2667,322 @@ def is_clearly_out_of_scope(user_message: str, docs) -> bool:
         return False
     sample = " ".join(strip_enrichment_header(d.page_content)[:300] for d in docs[:50])
     return not OUT_OF_SCOPE_TERMS_RE.search(sample)
+
+
+# =============================================================================
+# Pipe-table deterministic extractor
+# =============================================================================
+
+_TABLE_LOOKUP_SIGNALS = frozenset({
+    "얼마", "금액", "지급", "한도", "최대", "지급한도", "지급액", "지급기준",
+    "산출식", "공식", "쓰이나요", "어떤", "항목", "있나요", "각각", "형태",
+    "amount", "limit", "formula", "what", "how much", "each",
+})
+
+_TABLE_QUERY_GENERIC_TOKENS = frozenset({
+    "얼마", "얼마까지", "금액", "지급", "지급할", "지급액", "지급기준", "지급한도",
+    "한도", "최대", "어떤", "무엇", "무엇인가요", "형태로", "내용", "내용을",
+    "확인", "확인하는", "쓰이나요", "쓰나요", "각각", "있나요", "기본", "입력",
+    "항목", "리스트", "사이트", "학습용", "정의서", "학생", "지원금", "중앙구매",
+    "확인하", "핵심성과지표", "what", "how", "how much",
+    "amount", "limit", "formula", "each",
+})
+
+
+def _normalize_cell_text(text: str) -> str:
+    """Aggressive normalization for table cell / query token matching."""
+    text = re.sub(r"\s+", " ", (text or "")).strip().lower()
+    # Korean number/unit normalization
+    text = re.sub(r"만\s*원", "만원", text)
+    text = re.sub(r"천\s*원", "천원", text)
+    text = re.sub(r"퍼센트", "%", text)
+    # Compound word normalization
+    text = re.sub(r"산출\s*식", "산출식", text)
+    text = re.sub(r"지급\s*한도", "지급한도", text)
+    text = re.sub(r"지급\s*기준", "지급기준", text)
+    # Strip most punctuation; keep Korean, alphanums, spaces, %, ×, (), /
+    text = re.sub(r"[^\w\s\uAC00-\uD7A3\u3131-\u318E%()×/]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_korean_query_suffix(text: str) -> str:
+    stripped = _KOREAN_SUFFIX_RE.sub("", text)
+    if stripped and stripped != text:
+        return stripped
+    if len(text) >= 3 and text.endswith(("와", "과")) and not text.endswith("성과"):
+        return text[:-1]
+    return text
+
+
+def _normalize_table_query_token(text: str) -> str:
+    text = _normalize_cell_text(text)
+    stripped = _strip_korean_query_suffix(text)
+    return stripped or text
+
+
+def _table_query_match_tokens(text: str) -> List[str]:
+    """
+    Keep only table-specific anchor terms for row matching.
+
+    Generic lookup words like '얼마', '지급', '항목', '내용' are useful for
+    deciding that this *is* a table lookup, but they are too noisy for row
+    selection and can pull the scorer toward semantically-adjacent rows.
+    """
+    kept: List[str] = []
+    seen = set()
+    for token in normalize_fact_query_tokens(text):
+        norm = _normalize_table_query_token(token)
+        if len(norm) < 2 or norm in _TABLE_QUERY_GENERIC_TOKENS:
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            kept.append(norm)
+    if kept:
+        return kept
+    fallback: List[str] = []
+    for token in normalize_fact_query_tokens(text):
+        norm = _normalize_table_query_token(token)
+        if len(norm) < 2:
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            fallback.append(norm)
+    return fallback
+
+
+def _chunk_has_pipe_table(text: str) -> bool:
+    """
+    Return True only when text contains a genuine table structure:
+    - ≥2 lines with ≥2 pipe-separated non-empty cells
+    - column counts are consistent across those lines (≥2 within ±1 of the mode)
+    - at least one nontrivial label cell (≥2 chars, not purely numeric/symbol)
+    Rejects narrative text that happens to contain an occasional pipe character.
+    """
+    pipe_lines: List[List[str]] = []
+    for line in re.split(r"[\r\n]+", text or ""):
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cells) >= 2:
+            pipe_lines.append(cells)
+    if len(pipe_lines) < 2:
+        return False
+
+    col_counts = [len(row) for row in pipe_lines]
+    col_count_mode = max(set(col_counts), key=col_counts.count)
+    consistent = sum(1 for c in col_counts if abs(c - col_count_mode) <= 1)
+    if consistent < 2:
+        return False
+
+    has_label = any(
+        len(cells[0]) >= 2 and not re.fullmatch(r"[\d\s,%.×()/×\-]+", cells[0])
+        for cells in pipe_lines
+    )
+    return has_label
+
+
+def _parse_pipe_rows(text: str) -> List[List[str]]:
+    """Return all pipe-delimited rows (≥2 non-empty cells) from text."""
+    rows: List[List[str]] = []
+    for line in re.split(r"[\r\n]+", text or ""):
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cells) >= 2:
+            rows.append(cells)
+    return rows
+
+
+def _resolve_header_row(rows: List[List[str]]) -> Tuple[List[str], List[List[str]]]:
+    """
+    Split rows into (header_cells, data_rows).
+    The first row is treated as a header when all its cells are non-numeric
+    label-like text — the typical table header pattern.
+    """
+    if not rows:
+        return [], []
+    first = rows[0]
+    is_header = all(
+        len(c) >= 1 and not re.fullmatch(r"[\d\s,%.×()/×\-]+", c)
+        for c in first
+    )
+    if is_header and len(rows) > 1:
+        return first, rows[1:]
+    return [], rows
+
+
+def _target_column_from_header(
+    query_tokens: List[str], header_cells: List[str]
+) -> Optional[int]:
+    """
+    Return the 0-based column index (≥1) whose header cell best matches the
+    query (e.g. query contains '산출식' → column header '산출식' → column 2).
+    Returns None when no header column matches strongly enough.
+    """
+    if not header_cells:
+        return None
+    best_col: Optional[int] = None
+    best_score = 0.0
+    for col_idx in range(1, len(header_cells)):
+        h_norm = _normalize_cell_text(header_cells[col_idx])
+        col_score = sum(3.0 for t in query_tokens if _normalize_cell_text(t) in h_norm)
+        if col_score > best_score:
+            best_score = col_score
+            best_col = col_idx
+    return best_col if best_score >= 3.0 else None
+
+
+def _row_key_score(
+    query_tokens: List[str],
+    cells: List[str],
+    header_cells: List[str],
+) -> float:
+    """
+    Score a data row against query tokens.
+
+    Per-token weights:
+      cells[0] primary label column:   3.0
+      cells[1] secondary label/value:  1.5
+      cells[2+] value columns:         0.8
+      header match (context only):     1.0 — amplifies an existing row score only
+    """
+    if not cells or not query_tokens:
+        return 0.0
+    norm_cells = [_normalize_cell_text(c) for c in cells]
+    weights = [3.0, 1.5] + [0.8] * max(0, len(norm_cells) - 2)
+    row_score = 0.0
+    for token in query_tokens:
+        if len(token) < 2:
+            continue
+        nt = _normalize_table_query_token(token)
+        for col_idx, cell_norm in enumerate(norm_cells):
+            cell_loose = _KOREAN_SUFFIX_RE.sub("", cell_norm) or cell_norm
+            # Bidirectional substring for label column: handles josa-inflected tokens
+            if (
+                nt in cell_norm
+                or nt in cell_loose
+                or (col_idx == 0 and len(cell_norm) >= 2 and (cell_norm in nt or cell_loose in nt))
+            ):
+                row_score += weights[min(col_idx, len(weights) - 1)]
+    # Header bonus: only if the row already has a match
+    if row_score >= 3.0 and header_cells:
+        norm_header = [_normalize_cell_text(h) for h in header_cells]
+        for token in query_tokens:
+            nt = _normalize_cell_text(token)
+            if any(nt in h for h in norm_header):
+                row_score += 1.0
+    return row_score
+
+
+def try_pipe_table_lookup(
+    user_message: str, docs
+) -> Optional[Tuple[str, List[Any]]]:
+    """
+    Deterministically answer exact-lookup queries against pipe-delimited table
+    content extracted by pdfplumber.
+
+    Returns (answer_text, matched_docs) or None when:
+    - query lacks a direct-lookup signal, OR
+    - no retrieved chunk passes the pipe-table structure check, OR
+    - no data row scores ≥3.0 against the query tokens.
+
+    Call this before try_scoped_clause_answer() so non-table queries fall through
+    to the existing handlers without regression.
+    """
+    if not docs:
+        return None
+
+    lower = (user_message or "").lower()
+    if not any(t in lower for t in _TABLE_LOOKUP_SIGNALS):
+        return None
+
+    all_query_tokens = normalize_fact_query_tokens(user_message)
+    if not all_query_tokens:
+        return None
+    query_tokens = _table_query_match_tokens(user_message)
+    if not query_tokens:
+        return None
+
+    # Collect pipe-table data rows with per-chunk header and target-column info
+    row_candidates: List[Tuple[List[str], List[str], Optional[int], Any]] = []
+    for doc in docs:
+        raw = strip_enrichment_header(doc.page_content)
+        if not _chunk_has_pipe_table(raw):
+            continue
+        all_rows = _parse_pipe_rows(raw)
+        if not all_rows:
+            continue
+        header_cells, data_rows = _resolve_header_row(all_rows)
+        target_col = _target_column_from_header(all_query_tokens, header_cells)
+        for cells in data_rows:
+            row_candidates.append((cells, header_cells, target_col, doc))
+
+    if not row_candidates:
+        return None
+
+    # Score each data row
+    scored: List[Tuple[float, List[str], List[str], Optional[int], Any]] = []
+    for cells, header_cells, target_col, doc in row_candidates:
+        score = _row_key_score(query_tokens, cells, header_cells)
+        if score >= 3.0:
+            scored.append((score, cells, header_cells, target_col, doc))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: -x[0])
+    best_score = scored[0][0]
+    top_rows = [r for r in scored if r[0] >= best_score * 0.6][:4]
+
+    is_korean = bool(re.search(r"[가-힣]", user_message))
+    matched_docs_seen: Dict[int, Any] = {}
+    lines: List[str] = []
+    for idx, (_, cells, header_cells, target_col, doc) in enumerate(top_rows, start=1):
+        matched_docs_seen[id(doc)] = doc
+        label = cells[0]
+        # Detect formula-type target column: output full row so variable
+        # definitions in adjacent columns (분자, 분모) are included.
+        use_full_row = False
+        if target_col is not None and target_col < len(cells):
+            tcol_header = (
+                _normalize_cell_text(header_cells[target_col])
+                if header_cells and target_col < len(header_cells)
+                else ""
+            )
+            tcol_value = cells[target_col]
+            if (
+                any(kw in tcol_header for kw in ("산출식", "공식", "formula"))
+                or re.search(r"[A-Za-z][+\-×/][A-Za-z(]", tcol_value)
+            ):
+                use_full_row = True
+        if target_col is not None and target_col < len(cells) and not use_full_row:
+            col_name = (
+                header_cells[target_col]
+                if header_cells and target_col < len(header_cells)
+                else ""
+            )
+            value_str = cells[target_col]
+            lines.append(
+                f"- {label} ({col_name}): {value_str} [{idx}]"
+                if col_name
+                else f"- {label}: {value_str} [{idx}]"
+            )
+        elif header_cells and len(header_cells) > 1:
+            value_parts: List[str] = []
+            for vi, v in enumerate(cells[1:], start=1):
+                col_name = header_cells[vi] if vi < len(header_cells) else ""
+                value_parts.append(f"{col_name}: {v}" if col_name else v)
+            lines.append(f"- {label}: {', '.join(value_parts)} [{idx}]")
+        else:
+            lines.append(f"- {label}: {', '.join(cells[1:])} [{idx}]")
+
+    if not lines:
+        return None
+
+    prefix = (
+        "문서에서 확인한 내용은 다음과 같습니다:"
+        if is_korean
+        else "From the document:"
+    )
+    answer = prefix + "\n" + "\n".join(lines)
+    return answer, list(matched_docs_seen.values())

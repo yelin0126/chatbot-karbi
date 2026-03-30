@@ -9,10 +9,13 @@ IMPROVEMENTS over original:
 """
 
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import FileResponse
 
 from app.config import (
     DATA_DIR,
@@ -20,12 +23,17 @@ from app.config import (
     UPLOADS_DIR,
     CHROMA_DIR,
     ENABLE_OCR,
+    MEDIA_ENABLED,
 )
 from app.models.schemas import (
     ChatRequest,
     ChatResponse,
+    GenerateImageRequest,
+    GenerateVideoRequest,
     IngestRequest,
     CountKeywordRequest,
+    GeneratedAssetInfo,
+    MediaJobInfo,
     SourceInfo,
 )
 from app.core.llm import check_llm_health, get_available_models, get_default_model_name
@@ -39,12 +47,60 @@ from app.core.vectorstore import (
     reset as reset_vectorstore,
 )
 from app.chat.handlers import handle_chat
+from app.media.jobs import get_media_job_manager
+from app.media.router import (
+    build_grounded_media_brief,
+    detect_media_intent,
+    resolve_image_target_path,
+)
+from app.media.store import get_asset
 from app.pipeline.ingest import ingest_folder, ingest_single_file
 from app.pipeline.parser import extract_full_text
 
 logger = logging.getLogger("tilon.api")
 
 router = APIRouter()
+
+
+def _ensure_chat_id(chat_id: Optional[str]) -> str:
+    if chat_id and chat_id.strip():
+        return chat_id.strip()
+    return f"chat_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+
+
+def _build_chat_response(
+    *,
+    model: str,
+    answer: str,
+    mode: str,
+    chat_id: Optional[str],
+    result: Optional[dict] = None,
+    sources: Optional[list] = None,
+    media: Optional[list] = None,
+    job: Optional[dict] = None,
+    active_source: Optional[str] = None,
+    active_doc_id: Optional[str] = None,
+    active_source_type: Optional[str] = None,
+    active_sources: Optional[list] = None,
+    active_doc_ids: Optional[list] = None,
+) -> ChatResponse:
+    payload = result or {}
+    raw_sources = payload.get("sources", []) if sources is None else sources
+    return ChatResponse(
+        model=model,
+        answer=answer,
+        sources=[SourceInfo(**s) for s in raw_sources],
+        mode=mode,
+        active_source=payload.get("active_source", active_source),
+        active_doc_id=payload.get("active_doc_id", active_doc_id),
+        active_source_type=payload.get("active_source_type", active_source_type),
+        active_sources=payload.get("active_sources", active_sources or []),
+        active_doc_ids=payload.get("active_doc_ids", active_doc_ids or []),
+        chat_id=chat_id,
+        media=[GeneratedAssetInfo(**item) for item in (media or [])],
+        job=MediaJobInfo(**job) if job else None,
+        done=True,
+    )
 
 
 # ── Root ───────────────────────────────────────────────────────────────
@@ -105,10 +161,80 @@ def chat(req: ChatRequest):
     LLM decides how to respond. Works like a normal chatbot.
     """
     try:
+        selected_model = req.model or get_default_model_name()
+        chat_id = _ensure_chat_id(req.chat_id)
+
+        if MEDIA_ENABLED:
+            intent = detect_media_intent(req.message, active_source=req.active_source)
+            manager = get_media_job_manager()
+
+            if intent == "image_understanding":
+                image_path = resolve_image_target_path(req.active_source, req.active_doc_id)
+                if not image_path:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Image understanding requires an active uploaded image in the current chat scope.",
+                    )
+                analysis = manager.analyze_image(image_path=image_path, prompt=req.message)
+                return _build_chat_response(
+                    model=selected_model,
+                    answer=analysis["answer"],
+                    mode="image_understanding",
+                    chat_id=chat_id,
+                    sources=[],
+                    media=[],
+                    active_source=req.active_source,
+                    active_doc_id=req.active_doc_id,
+                    active_source_type=req.active_source_type,
+                    active_sources=req.active_sources,
+                    active_doc_ids=req.active_doc_ids,
+                )
+
+            if intent in {"image_generation", "video_generation"}:
+                brief = build_grounded_media_brief(
+                    user_message=req.message,
+                    active_source=req.active_source,
+                    active_doc_id=req.active_doc_id,
+                    active_source_type=req.active_source_type,
+                )
+                if intent == "image_generation":
+                    job = manager.submit_image_job(
+                        chat_id=chat_id,
+                        prompt=req.message,
+                        grounded_brief=brief["brief"],
+                        source_refs=brief["sources"],
+                    )
+                    answer = "이미지 생성을 시작했습니다. 완료되면 이 채팅에 결과를 연결해 드릴게요."
+                    mode = "image_generation"
+                else:
+                    job = manager.submit_video_job(
+                        chat_id=chat_id,
+                        prompt=req.message,
+                        grounded_brief=brief["brief"],
+                        source_refs=brief["sources"],
+                    )
+                    answer = "영상 생성을 시작했습니다. 완료되면 이 채팅에 결과를 연결해 드릴게요."
+                    mode = "video_generation"
+
+                return _build_chat_response(
+                    model=selected_model,
+                    answer=answer,
+                    mode=mode,
+                    chat_id=chat_id,
+                    sources=brief["sources"],
+                    media=[],
+                    job=job,
+                    active_source=req.active_source,
+                    active_doc_id=req.active_doc_id,
+                    active_source_type=req.active_source_type,
+                    active_sources=req.active_sources,
+                    active_doc_ids=req.active_doc_ids,
+                )
+
         result = handle_chat(
             user_message=req.message,
             history=req.history,
-            model=req.model or get_default_model_name(),
+            model=selected_model,
             active_source=req.active_source,
             active_doc_id=req.active_doc_id,
             active_source_type=req.active_source_type,
@@ -117,17 +243,17 @@ def chat(req: ChatRequest):
             system_prompt=req.system_prompt,
         )
 
-        return ChatResponse(
-            model=req.model or get_default_model_name(),
+        return _build_chat_response(
+            model=selected_model,
             answer=result["answer"],
-            sources=[SourceInfo(**s) for s in result.get("sources", [])],
             mode=result.get("mode", "general"),
-            active_source=result.get("active_source", req.active_source),
-            active_doc_id=result.get("active_doc_id", req.active_doc_id),
-            active_source_type=result.get("active_source_type", req.active_source_type),
-            active_sources=result.get("active_sources", req.active_sources),
-            active_doc_ids=result.get("active_doc_ids", req.active_doc_ids),
-            done=True,
+            chat_id=chat_id,
+            result=result,
+            active_source=req.active_source,
+            active_doc_id=req.active_doc_id,
+            active_source_type=req.active_source_type,
+            active_sources=req.active_sources,
+            active_doc_ids=req.active_doc_ids,
         )
 
     except HTTPException:
@@ -144,6 +270,7 @@ async def chat_with_file(
     file: UploadFile = File(...),
     message: str = Form(default="이 문서의 내용을 요약해줘"),
     model: str = Form(default=None),
+    chat_id: str = Form(default=None),
 ):
     """
     Upload a file AND ask a question about it in one request.
@@ -176,6 +303,33 @@ async def chat_with_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
+    selected_model = model or get_default_model_name()
+    resolved_chat_id = _ensure_chat_id(chat_id)
+
+    if MEDIA_ENABLED and ext in {".png", ".jpg", ".jpeg", ".webp"}:
+        intent = detect_media_intent(message or "이 이미지를 설명해줘", active_source=file.filename)
+        if intent == "image_understanding" or not message.strip():
+            try:
+                analysis = get_media_job_manager().analyze_image(
+                    image_path=save_path,
+                    prompt=message or "이 이미지를 설명해줘",
+                )
+                return {
+                    "model": selected_model,
+                    "answer": analysis["answer"],
+                    "sources": [],
+                    "mode": "image_understanding",
+                    "chat_id": resolved_chat_id,
+                    "active_source": file.filename,
+                    "active_doc_id": None,
+                    "active_sources": [file.filename],
+                    "active_doc_ids": [],
+                    "media": [],
+                    "done": True,
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Image understanding failed: {e}")
+
     # Step 2: Ingest into ChromaDB
     ingest_result = ingest_single_file(save_path)
 
@@ -191,8 +345,6 @@ async def chat_with_file(
         }
 
     # Step 3: Answer using the unified handler, scoped to this file
-    selected_model = model or get_default_model_name()
-
     result = handle_chat(
         user_message=message,
         model=selected_model,
@@ -209,6 +361,7 @@ async def chat_with_file(
         "active_doc_id": ingest_result.get("doc_id"),
         "active_sources": [file.filename],
         "active_doc_ids": [ingest_result.get("doc_id")] if ingest_result.get("doc_id") else [],
+        "chat_id": resolved_chat_id,
         "ingest": ingest_result,
         "done": True,
     }
@@ -487,3 +640,106 @@ def count_keyword(req: CountKeywordRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"count-keyword failed: {e}")
+
+
+# ── Media Generation / Assets ────────────────────────────────────────
+
+@router.post("/generate-image")
+def generate_image(req: GenerateImageRequest):
+    if not MEDIA_ENABLED:
+        raise HTTPException(status_code=503, detail="Media generation is disabled.")
+
+    chat_id = _ensure_chat_id(req.chat_id)
+    brief = build_grounded_media_brief(
+        user_message=req.prompt,
+        active_source=req.active_source,
+        active_doc_id=req.active_doc_id,
+        active_source_type=req.active_source_type,
+    )
+    job = get_media_job_manager().submit_image_job(
+        chat_id=chat_id,
+        prompt=req.prompt,
+        grounded_brief=brief["brief"],
+        source_refs=brief["sources"],
+        payload={
+            "width": req.width,
+            "height": req.height,
+            "num_inference_steps": req.num_inference_steps,
+            "guidance_scale": req.guidance_scale,
+        },
+    )
+    return {
+        "chat_id": chat_id,
+        "job": job,
+        "media": [],
+        "sources": brief["sources"],
+        "answer": "이미지 생성을 시작했습니다.",
+    }
+
+
+@router.post("/generate-video")
+def generate_video(req: GenerateVideoRequest):
+    if not MEDIA_ENABLED:
+        raise HTTPException(status_code=503, detail="Media generation is disabled.")
+
+    chat_id = _ensure_chat_id(req.chat_id)
+    brief = build_grounded_media_brief(
+        user_message=req.prompt,
+        active_source=req.active_source,
+        active_doc_id=req.active_doc_id,
+        active_source_type=req.active_source_type,
+    )
+    job = get_media_job_manager().submit_video_job(
+        chat_id=chat_id,
+        prompt=req.prompt,
+        grounded_brief=brief["brief"],
+        source_refs=brief["sources"],
+        payload={
+            "width": req.width,
+            "height": req.height,
+            "num_frames": req.num_frames,
+            "fps": req.fps,
+        },
+    )
+    return {
+        "chat_id": chat_id,
+        "job": job,
+        "media": [],
+        "sources": brief["sources"],
+        "answer": "영상 생성을 시작했습니다.",
+    }
+
+
+@router.get("/media/jobs/{job_id}")
+def get_media_job(job_id: str):
+    job = get_media_job_manager().get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Media job not found.")
+    asset = get_asset(job["asset_id"]) if job.get("asset_id") else None
+    return {
+        "job": job,
+        "asset": asset,
+    }
+
+
+@router.get("/media/assets/{asset_id}")
+def get_media_asset(asset_id: str, thumbnail: int = Query(default=0)):
+    asset = get_asset(asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Media asset not found.")
+
+    key = "thumbnail_path" if thumbnail else "file_path"
+    file_path = Path(asset.get(key) or asset.get("file_path") or "")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Media asset file is missing.")
+    return FileResponse(file_path)
+
+
+@router.get("/media/chats/{chat_id}")
+def get_chat_media(chat_id: str):
+    manager = get_media_job_manager()
+    return {
+        "chat_id": chat_id,
+        "jobs": manager.list_jobs_for_chat(chat_id),
+        "media": manager.list_assets_for_chat(chat_id),
+    }

@@ -31,13 +31,30 @@ _reranker_load_failed = False
 _reranker_device = RERANKER_DEVICE
 
 
+def _resolve_reranker_device(requested_device: str) -> str:
+    if requested_device != "cuda":
+        return requested_device
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+
+    logger.warning(
+        "Reranker device was configured as 'cuda' but no CUDA GPU is available; falling back to CPU."
+    )
+    return "cpu"
+
+
 def _load_reranker(force_device: Optional[str] = None):
     """Lazy-load the reranker model."""
     global _reranker
     global _reranker_load_failed
     global _reranker_device
 
-    requested_device = force_device or _reranker_device
+    requested_device = _resolve_reranker_device(force_device or _reranker_device)
 
     if _reranker is not None and requested_device == _reranker_device:
         return _reranker

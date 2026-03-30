@@ -291,20 +291,20 @@ def summarize_results(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         for row in items
         if row.get("answer_scoring") is not None
     ]
+    unevaluated = sum(1 for row in items if row.get("answer_scoring") is None)
     full_pass = sum(
         1
         for row in items
         if row["source_scoring"]["expected_source_recall"] == 1.0
-        and (
-            row.get("answer_scoring") is None
-            or row["answer_scoring"]["expected_points_recall"] == 1.0
-        )
+        and row.get("answer_scoring") is not None
+        and row["answer_scoring"]["expected_points_recall"] == 1.0
     )
     return {
         "total_rows": len(items),
         "avg_source_recall": round(sum(source_recalls) / len(source_recalls), 3) if source_recalls else None,
         "avg_answer_point_recall": round(sum(answer_recalls) / len(answer_recalls), 3) if answer_recalls else None,
         "full_pass_count": full_pass,
+        "unevaluated_count": unevaluated,
     }
 
 
@@ -315,7 +315,7 @@ def main() -> int:
     parser.add_argument(
         "--mode",
         choices=["retrieval", "full"],
-        default="retrieval",
+        default="full",
         help="`retrieval` stops after the chat retrieval stage; `full` runs generation too.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit number of rows")

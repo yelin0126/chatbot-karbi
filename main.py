@@ -21,6 +21,7 @@ from app.config import (
     logger,
     AUTO_INGEST_ON_STARTUP,
     DATA_DIR,
+    GENERATED_DIR,
     LIBRARY_DIR,
     UPLOADS_DIR,
     TEMP_DIR,
@@ -33,6 +34,7 @@ from app.config import (
 )
 from app.core.vectorstore import get_vectorstore
 from app.core.watcher import start_watcher, stop_watcher
+from app.media import start_media_job_manager, stop_media_job_manager
 from app.pipeline.ingest import ingest_folder
 from app.api.routes import router as main_router
 from app.api.openai_compat import router as openai_router
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
     logger.info("  Data dir      : %s", DATA_DIR)
     logger.info("  Library dir   : %s", LIBRARY_DIR)
     logger.info("  Uploads dir   : %s", UPLOADS_DIR)
+    logger.info("  Generated dir : %s", GENERATED_DIR)
     logger.info("  Temp dir      : %s", TEMP_DIR)
     logger.info("  File watcher  : active (auto-ingests new files in data/library/)")
     logger.info("  Chat UI       : http://localhost:8000/ui")
@@ -62,6 +65,7 @@ async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
     # Initialize vectorstore
@@ -77,9 +81,11 @@ async def lifespan(app: FastAPI):
 
     # Start file watcher (auto-ingests new files dropped into data/library/)
     start_watcher()
+    start_media_job_manager()
 
     yield  # App is running
 
+    stop_media_job_manager()
     stop_watcher()
     logger.info("Tilon AI Chatbot API shutting down.")
 

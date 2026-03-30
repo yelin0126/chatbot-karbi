@@ -204,6 +204,14 @@ CHAT_UI_HTML = """
         .sources{margin-top:6px;display:flex;flex-wrap:wrap;gap:5px}
         .source-tag{font-size:.66rem;padding:2px 8px;background:rgba(245,158,11,.14);color:#ffd9a0;border-radius:999px;border:1px solid rgba(245,158,11,.4)}
         .file-badge{font-size:.72rem;padding:4px 9px;background:rgba(26,163,154,.15);color:#9ef7ed;border-radius:999px;margin-bottom:6px;display:inline-block;border:1px solid rgba(26,163,154,.45)}
+        .job-card{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid rgba(26,163,154,.38);background:rgba(26,163,154,.10);color:#c8fff8;font-size:.76rem}
+        .job-card.failed{border-color:rgba(248,113,113,.45);background:rgba(248,113,113,.08);color:#ffd7d7}
+        .media-block{margin-top:10px;display:flex;flex-direction:column;gap:10px}
+        .media-item{border:1px solid var(--line);border-radius:14px;padding:10px;background:rgba(13,22,34,.74)}
+        .media-item img,.media-item video{width:100%;max-width:100%;border-radius:10px;border:1px solid var(--line);background:#09111b}
+        .media-meta{margin-top:7px;font-size:.71rem;color:#9cb2cc;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+        .media-link{color:#9ef7ed;text-decoration:none}
+        .media-link:hover{text-decoration:underline}
 
         /* Typing */
         .typing{display:none;max-width:840px;margin:0 auto;padding:0 16px}
@@ -406,7 +414,7 @@ const shelfFileInput=document.getElementById('shelfFileInput');
 
 let pendingFiles=[];
 let currentChatId=null;
-let chats={};  // {id: {title, messages: [{role,content,sources,mode,fileName}]}}
+let chats={};  // {id: {title, messages: [{role,content,sources,mode,fileName,media,job}], pendingJobs: []}}
 
 // ═══════════════════════════════════════════════════════════
 // Chat History (localStorage)
@@ -418,6 +426,11 @@ function loadChats(){
         if(!Array.isArray(chats[id].messages))chats[id].messages=[];
         if(typeof chats[id].activeSource!=='string')chats[id].activeSource='';
         if(typeof chats[id].activeDocId!=='string')chats[id].activeDocId='';
+        if(!Array.isArray(chats[id].pendingJobs))chats[id].pendingJobs=[];
+        for(const m of chats[id].messages){
+            if(!Array.isArray(m.media))m.media=[];
+            if(typeof m.job==='undefined')m.job=null;
+        }
     }
 }
 function saveChats(){
@@ -426,7 +439,7 @@ function saveChats(){
 
 function newChat(){
     currentChatId='chat_'+Date.now();
-    chats[currentChatId]={title:'New Chat',messages:[],activeSource:'',activeDocId:''};
+    chats[currentChatId]={title:'New Chat',messages:[],activeSource:'',activeDocId:'',pendingJobs:[]};
     saveChats();
     messagesEl.innerHTML='';
     renderActiveSource();
@@ -441,11 +454,12 @@ function loadChat(id){
     if(!chat)return;
     messagesEl.innerHTML='';
     for(const m of chat.messages){
-        appendMessageDOM(m.role,m.content,m.sources,m.mode,m.fileName);
+        appendMessageDOM(m.role,m.content,m.sources,m.mode,m.fileName,m.media,m.job);
     }
     renderActiveSource();
     renderHistory();
     renderShelfDocs(window.__shelfDocs||[]);
+    resumePendingJobsForChat(id);
     scrollBottom();
 }
 
@@ -514,10 +528,88 @@ function clearActiveSource(){
     pushMessage('system','Document scope cleared: '+cleared);
 }
 
-function pushMessage(role,content,sources,mode,fileName){
-    if(!currentChatId)newChat();
-    chats[currentChatId].messages.push({role,content,sources:sources||[],mode:mode||'',fileName:fileName||''});
+function pushMessageToChat(chatId,role,content,sources,mode,fileName,media,job){
+    if(!chatId)return;
+    if(!chats[chatId]){
+        chats[chatId]={title:'New Chat',messages:[],activeSource:'',activeDocId:'',pendingJobs:[]};
+    }
+    chats[chatId].messages.push({
+        role,
+        content,
+        sources:sources||[],
+        mode:mode||'',
+        fileName:fileName||'',
+        media:Array.isArray(media)?media:[],
+        job:job||null
+    });
     saveChats();
+}
+
+function pushMessage(role,content,sources,mode,fileName,media,job){
+    if(!currentChatId)newChat();
+    pushMessageToChat(currentChatId,role,content,sources,mode,fileName,media,job);
+}
+
+function rememberPendingJob(chatId,jobId){
+    if(!chatId||!jobId||!chats[chatId])return;
+    if(!Array.isArray(chats[chatId].pendingJobs))chats[chatId].pendingJobs=[];
+    if(!chats[chatId].pendingJobs.includes(jobId)){
+        chats[chatId].pendingJobs.push(jobId);
+        saveChats();
+    }
+}
+
+function clearPendingJob(chatId,jobId){
+    if(!chatId||!jobId||!chats[chatId]||!Array.isArray(chats[chatId].pendingJobs))return;
+    chats[chatId].pendingJobs=chats[chatId].pendingJobs.filter(id=>id!==jobId);
+    saveChats();
+}
+
+function chatHasAsset(chatId,assetId){
+    const chat=chats[chatId];
+    if(!chat||!assetId)return false;
+    return chat.messages.some(m=>Array.isArray(m.media)&&m.media.some(a=>a.asset_id===assetId));
+}
+
+async function pollMediaJob(chatId,jobId){
+    if(!chatId||!jobId)return;
+    try{
+        const resp=await fetch(`/media/jobs/${encodeURIComponent(jobId)}`);
+        const data=await readApiJson(resp);
+        if(!resp.ok)return;
+        const job=data.job;
+        if(!job)return;
+
+        if(job.status==='queued'||job.status==='running'){
+            setTimeout(()=>pollMediaJob(chatId,jobId),2500);
+            return;
+        }
+
+        clearPendingJob(chatId,jobId);
+
+        if(job.status==='completed'&&data.asset&&!chatHasAsset(chatId,data.asset.asset_id)){
+            const label=job.job_type==='video_generation'?'영상이 준비되었습니다.':'이미지가 준비되었습니다.';
+            if(currentChatId===chatId){
+                appendMessageDOM('assistant',label,data.asset.source_refs||[],job.job_type==='video_generation'?'video_generation':'image_generation','',[data.asset],null);
+            }
+            pushMessageToChat(chatId,'assistant',label,data.asset.source_refs||[],job.job_type==='video_generation'?'video_generation':'image_generation','',[data.asset],null);
+        }else if(job.status==='failed'){
+            if(currentChatId===chatId){
+                appendMessageDOM('system',`Media job failed: ${job.error||'Unknown error'}`,[],job.job_type,'',[],job);
+            }
+            pushMessageToChat(chatId,'system',`Media job failed: ${job.error||'Unknown error'}`,[],job.job_type,'',[],job);
+        }
+    }catch{
+        setTimeout(()=>pollMediaJob(chatId,jobId),4000);
+    }
+}
+
+function resumePendingJobsForChat(chatId){
+    const chat=chats[chatId];
+    if(!chat||!Array.isArray(chat.pendingJobs))return;
+    for(const jobId of chat.pendingJobs){
+        pollMediaJob(chatId,jobId);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -786,6 +878,7 @@ async function sendMessage(){
             fd.append('file',file);
             fd.append('message',displayText);
             fd.append('model',selectedModel);
+            fd.append('chat_id',currentChatId);
             fd.append('web_search_enabled',webSearchEnabled?'true':'false');
 
             const resp=await fetch('/chat-with-file',{method:'POST',body:fd});
@@ -854,6 +947,7 @@ async function sendMessage(){
                         message:text,
                         history:history,
                         model:selectedModel,
+                        chat_id:currentChatId,
                         active_source:null,
                         active_doc_id:null,
                         web_search_enabled:webSearchEnabled
@@ -888,6 +982,7 @@ async function sendMessage(){
                     message:text,
                     history:history,
                     model:selectedModel,
+                    chat_id:currentChatId,
                     active_source:activeSource||null,
                     active_doc_id:activeDocId||null,
                     web_search_enabled:webSearchEnabled
@@ -904,8 +999,12 @@ async function sendMessage(){
         }
 
         if(data){
-            appendMessageDOM('assistant',data.answer,data.sources,data.mode);
-            pushMessage('assistant',data.answer,data.sources,data.mode);
+            appendMessageDOM('assistant',data.answer,data.sources,data.mode,'',data.media||[],data.job||null);
+            pushMessage('assistant',data.answer,data.sources,data.mode,'',data.media||[],data.job||null);
+            if(data.job&&data.job.job_id){
+                rememberPendingJob(currentChatId,data.job.job_id);
+                pollMediaJob(currentChatId,data.job.job_id);
+            }
         }
         loadHealth();
     }catch(err){showError('Connection error: '+err.message);}
@@ -921,12 +1020,34 @@ function showError(msg){
 // Render
 // ═══════════════════════════════════════════════════════════
 
-function appendMessageDOM(role,content,sources,mode,fileName){
+function renderMediaHtml(media){
+    if(!Array.isArray(media)||!media.length)return '';
+    return '<div class="media-block">'+media.map(asset=>{
+        const isVideo=asset.asset_type==='video';
+        const body=isVideo
+            ? `<video controls preload="metadata" src="${esc(asset.file_url||'')}"></video>`
+            : `<img loading="lazy" src="${esc(asset.file_url||'')}" alt="generated media">`;
+        return `<div class="media-item">${body}<div class="media-meta"><span>${esc(asset.model_name||asset.asset_type||'media')}</span><a class="media-link" href="${esc(asset.file_url||'#')}" target="_blank" rel="noopener">Open</a></div></div>`;
+    }).join('')+'</div>';
+}
+
+function renderJobHtml(job){
+    if(!job)return '';
+    const failed=job.status==='failed';
+    const label=failed
+        ? `Generation failed: ${esc(job.error||'Unknown error')}`
+        : `${esc(job.job_type||'media')} in progress`;
+    return `<div class="job-card${failed?' failed':''}">${label}</div>`;
+}
+
+function appendMessageDOM(role,content,sources,mode,fileName,media,job){
     const av={user:'U',assistant:'AI',system:'i'};
     const nm={user:'You',assistant:'Tilon AI',system:'System'};
     let fileHtml=fileName?`<div class="file-badge">&#128206; ${esc(fileName)}</div>`:'';
     let modeHtml=mode?`<span class="mode-tag">${esc(mode)}</span>`:'';
     let srcHtml='';
+    let mediaHtml=renderMediaHtml(media);
+    let jobHtml=renderJobHtml(job);
     if(sources&&sources.length){
         srcHtml='<div class="sources">'+sources.map(s=>{
             const label=`${s.source||'?'} p.${s.page||'?'}`;
@@ -935,7 +1056,7 @@ function appendMessageDOM(role,content,sources,mode,fileName){
         }).join('')+'</div>';
     }
     const w=document.createElement('div');w.className='msg-wrap';
-    w.innerHTML=`<div class="message ${role}"><div class="avatar">${av[role]||'?'}</div><div class="body"><div class="sender">${nm[role]||role} ${modeHtml}</div>${fileHtml}<div class="content">${esc(content)}</div>${srcHtml}</div></div>`;
+    w.innerHTML=`<div class="message ${role}"><div class="avatar">${av[role]||'?'}</div><div class="body"><div class="sender">${nm[role]||role} ${modeHtml}</div>${fileHtml}<div class="content">${esc(content)}</div>${srcHtml}${jobHtml}${mediaHtml}</div></div>`;
     messagesEl.appendChild(w);scrollBottom();
 }
 
@@ -1065,6 +1186,7 @@ initWebSearchToggle();
 loadModels();
 loadHealth();
 loadShelfDocs();
+for(const id of Object.keys(chats)){resumePendingJobsForChat(id);}
 setInterval(loadHealth,30000);
 
 // Load most recent chat or start new
